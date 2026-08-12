@@ -243,17 +243,35 @@
             this.graphql(net, '{ ' + parts.join(' ') + ' }', ok, err);
         },
 
-        // Все нужные списки пользователя одним запросом
-        userRates: function (net, user_id, ok, err) {
-            var fields = 'id status episodes score anime { ' + this.animeFields() + ' }';
-            var statuses = ['watching', 'rewatching', 'planned', 'on_hold', 'completed'];
-            var parts = [];
-            for (var i = 0; i < statuses.length; i++) {
-                var st = statuses[i];
-                parts.push(st + ': userRates(userId: ' + parseInt(user_id, 10) + ', targetType: Anime, status: ' + st +
-                    ', limit: 50, page: 1, order: { field: updated_at, order: desc }) { ' + fields + ' }');
+        // Все оценки пользователя одним плоским запросом REST v2
+        // (без вложенных аниме — обходит лимит сложности GraphQL, отдаёт все статусы)
+        userRatesFlat: function (net, user_id, ok, err) {
+            net.get(this.base() + '/api/v2/user_rates?user_id=' + parseInt(user_id, 10) + '&target_type=Anime', function (list) {
+                if (!list || Object.prototype.toString.call(list) !== '[object Array]') return err('rates');
+                ok(list);
+            }, err);
+        },
+
+        // Карточки аниме по списку id (GraphQL, чанками по 50)
+        animesByIds: function (net, ids, ok, err) {
+            var self = this;
+            var result = [];
+            var offset = 0;
+
+            function nextChunk() {
+                if (offset >= ids.length) return ok(result);
+                var part = ids.slice(offset, offset + 50);
+                offset += 50;
+                var q = '{ animes(ids: ' + JSON.stringify(part.join(',')) + ', limit: 50) { ' + self.animeFields() + ' } }';
+                self.graphql(net, q, function (data) {
+                    var list = data.animes || [];
+                    for (var i = 0; i < list.length; i++) result.push(list[i]);
+                    nextChunk();
+                }, err);
             }
-            this.graphql(net, '{ ' + parts.join(' ') + ' }', ok, err);
+
+            if (!ids.length) return ok([]);
+            nextChunk();
         },
 
         userId: function (net, nickname, ok, err) {
@@ -653,7 +671,9 @@
         rates_cache: null,
         rates_time: 0,
 
-        // Все списки пользователя (кэш 10 минут)
+        // Списки пользователя (кэш 10 минут):
+        // 1) плоский REST v2 со всеми статусами -> membership-карта mals
+        // 2) GraphQL animes(ids:) -> карточки для «Я смотрю»
         rates: function (net, ok, err) {
             var nick = storGet('shikimori_user', '');
             if (!nick) return err('no_user');
@@ -661,26 +681,33 @@
             if (this.rates_cache && Date.now() - this.rates_time < RATES_TTL) return ok(this.rates_cache);
 
             Shiki.userId(net, nick, function (user_id) {
-                Shiki.userRates(net, user_id, function (data) {
-                    var result = { watching: [], planned: [], other: [] };
-                    var statuses = ['watching', 'rewatching', 'planned', 'on_hold', 'completed'];
-                    for (var i = 0; i < statuses.length; i++) {
-                        var list = data[statuses[i]] || [];
-                        for (var j = 0; j < list.length; j++) {
-                            var rate = list[j];
-                            if (!rate || !rate.anime) continue;
-                            var item = rate.anime;
-                            item._rate_status = rate.status || statuses[i];
-                            item._rate_episodes = rate.episodes || 0;
-                            item._rate_score = rate.score || 0;
-                            if (statuses[i] == 'watching' || statuses[i] == 'rewatching') result.watching.push(item);
-                            else if (statuses[i] == 'planned') result.planned.push(item);
-                            else result.other.push(item);
-                        }
+                Shiki.userRatesFlat(net, user_id, function (flat) {
+                    var mals = {};
+                    var watching_ids = [];
+                    for (var i = 0; i < flat.length; i++) {
+                        var rate = flat[i];
+                        if (!rate || !rate.target_id || rate.status == 'dropped') continue;
+                        mals[rate.target_id] = { status: rate.status, episodes: rate.episodes || 0, score: rate.score || 0 };
+                        if (rate.status == 'watching' || rate.status == 'rewatching') watching_ids.push(rate.target_id);
                     }
-                    self.rates_cache = result;
-                    self.rates_time = Date.now();
-                    ok(result);
+
+                    Shiki.animesByIds(net, watching_ids, function (animes) {
+                        var watching = [];
+                        for (var i = 0; i < animes.length; i++) {
+                            var item = animes[i];
+                            var rate = mals[parseInt(item.malId || item.id, 10)];
+                            if (rate) {
+                                item._rate_status = rate.status;
+                                item._rate_episodes = rate.episodes;
+                                item._rate_score = rate.score;
+                            }
+                            watching.push(item);
+                        }
+                        var result = { watching: watching, mals: mals };
+                        self.rates_cache = result;
+                        self.rates_time = Date.now();
+                        ok(result);
+                    }, err);
                 }, err);
             }, err);
         },
@@ -735,10 +762,11 @@
 
                 function finish(rates) {
                     var my_mals = {};
+                    var watching_map = {};
                     if (rates) {
-                        var all = rates.watching.concat(rates.planned).concat(rates.other);
-                        for (var i = 0; i < all.length; i++) {
-                            my_mals['m' + (all[i].malId || all[i].id)] = all[i];
+                        for (var mal in rates.mals) my_mals['m' + mal] = rates.mals[mal];
+                        for (var i = 0; i < rates.watching.length; i++) {
+                            watching_map['m' + (rates.watching[i].malId || rates.watching[i].id)] = rates.watching[i];
                         }
                     }
 
@@ -758,7 +786,7 @@
 
                             entry.tmdb = mapped || null;
                             entry.my = !!(mine || fav);
-                            entry.rate = mine || null;
+                            entry.rate = watching_map['m' + mal] || null;
                             entry.fav_card = fav || null;
                             result.push(entry);
                         }
