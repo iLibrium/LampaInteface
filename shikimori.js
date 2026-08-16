@@ -37,6 +37,8 @@
     var KODIK_PAGES = 2;                      // 2 страницы по 100 строк ~ сутки релизов
     var KODIK_LOOKUP_MAX = 8;                 // точечных запросов за обновление — не больше
     var KODIK_FRESH_DAYS = 14;                // «новой» серия считается столько дней
+    var REVERSE_MAX = 40;                     // обратных запросов TMDB->MAL за обновление
+    var REVERSE_PARALLEL = 4;                 // и сколько из них одновременно
 
     var manifest = {
         type: 'video',
@@ -611,6 +613,60 @@
     };
 
     /* ============================================================
+     * Прогресс просмотра — по данным самой Lampa
+     * ------------------------------------------------------------
+     * Отметки лежат в Timeline с ключом hash(сезон + серия + оригинальное
+     * название), а «последнее, что включали» онлайн-балансеры пишут в
+     * online_watched_last. Знает только то, что смотрели внутри Lampa.
+     * ============================================================ */
+
+    var Progress = {
+        // До какой серии досмотрено. null — отметок нет
+        lastWatched: function (card, max_ep) {
+            var name = card.original_name || card.original_title || '';
+            if (!name) return null;
+
+            var episode = 0;
+            var season = 1;
+
+            // 1. Прямая запись «где остановился» от онлайн-балансеров
+            try {
+                var last = Lampa.Storage.get('online_watched_last', {}) || {};
+                var filed = last[Lampa.Utils.hash(card.original_title || name)];
+                if (filed && filed.episode) {
+                    episode = parseInt(filed.episode, 10) || 0;
+                    season = parseInt(filed.season, 10) || 1;
+                }
+            }
+            catch (e) {}
+
+            // 2. Отметки таймлайна — штатный обход серий первого сезона
+            try {
+                var marks = Lampa.Timeline.watched(card, true);
+                if (marks && marks.length) {
+                    var top = marks[marks.length - 1];
+                    if (top && top.ep > episode) { episode = top.ep; season = 1; }
+                }
+            }
+            catch (e) {}
+
+            // 3. Timeline.watched обходит только серии 1..24 первого сезона.
+            // Если серий заведомо больше — досматриваем хвост точечно
+            if (max_ep > 24) {
+                try {
+                    for (var ep = max_ep; ep > episode && ep > 24; ep--) {
+                        var view = Lampa.Timeline.watchedEpisode(card, season, ep, true);
+                        if (view && view.percent) { episode = ep; break; }
+                    }
+                }
+                catch (e) {}
+            }
+
+            return episode ? { episode: episode, season: season } : null;
+        }
+    };
+
+    /* ============================================================
      * Матчинг Shikimori (MAL id) -> TMDB
      * ============================================================ */
 
@@ -691,6 +747,73 @@
             }
 
             nextChunk();
+        },
+
+        // Обратный маппинг TMDB -> Shikimori. У ARM для этого отдельный эндпоинт:
+        // в TMDB один сериал на все сезоны, а в Shikimori сезон — отдельный тайтл,
+        // поэтому ответ — список (по записи на сезон)
+        reverseGet: function (tmdb) {
+            var cache = storGet('shikimori_rev_match', {});
+            var hit = cache['t' + tmdb];
+            if (!hit || Date.now() - (hit.time || 0) > MATCH_TTL) return null;
+            return hit.mals || [];
+        },
+
+        reverseSet: function (tmdb, mals) {
+            var cache = storGet('shikimori_rev_match', {});
+            cache['t' + tmdb] = { mals: mals, time: Date.now() };
+            var keys = [];
+            for (var k in cache) keys.push(k);
+            if (keys.length > 400) {
+                keys.sort(function (a, b) { return (cache[a].time || 0) - (cache[b].time || 0); });
+                for (var i = 0; i < keys.length - 400; i++) delete cache[keys[i]];
+            }
+            storSet('shikimori_rev_match', cache);
+        },
+
+        reverse: function (net, tmdb_ids, ok) {
+            var self = this;
+            var result = {};
+            var need = [];
+
+            for (var i = 0; i < tmdb_ids.length; i++) {
+                var hit = this.reverseGet(tmdb_ids[i]);
+                if (hit) result[tmdb_ids[i]] = hit;
+                else need.push(tmdb_ids[i]);
+            }
+
+            need = need.slice(0, REVERSE_MAX);
+            if (!need.length) return ok(result);
+
+            var index = 0;
+            var alive = Math.min(REVERSE_PARALLEL, need.length);
+            var done = alive;
+
+            for (i = 0; i < alive; i++) worker();
+
+            function worker() {
+                if (index >= need.length) {
+                    done--;
+                    if (done <= 0) ok(result);
+                    return;
+                }
+                var tmdb = need[index++];
+                net.get(ARM_BASE + '/api/v2/themoviedb?id=' + tmdb, function (list) {
+                    var mals = [];
+                    for (var j = 0; j < (list || []).length; j++) {
+                        var entry = list[j];
+                        if (entry && entry.myanimelist) {
+                            mals.push({ mal: entry.myanimelist, season: entry['themoviedb-season'] || 0 });
+                        }
+                    }
+                    self.reverseSet(tmdb, mals);
+                    result[tmdb] = mals;
+                    worker();
+                }, function () {
+                    // ARM не ответил — не кэшируем пустоту, попробуем в следующий раз
+                    worker();
+                });
+            }
         },
 
         // Одиночный маппинг с полным фолбэком: ARM -> TMDB find -> TMDB search
@@ -974,7 +1097,8 @@
             this.rates_time = 0;
         },
 
-        // Карточки закладок Lampa/CUB, похожие на аниме
+        // Карточки закладок Lampa/CUB, похожие на аниме.
+        // Категорию запоминаем: «Смотрю» отличается от остальных
         lampaFavorites: function () {
             var cards = [];
             var seen = {};
@@ -984,129 +1108,154 @@
                 try { list = Lampa.Favorite.get({ type: groups[i] }) || []; } catch (e) {}
                 for (var j = 0; j < list.length; j++) {
                     var card = list[j];
-                    if (!card || !card.id || seen['f' + card.id]) continue;
-                    seen['f' + card.id] = true;
+                    if (!card || !card.id) continue;
+                    if (seen['f' + card.id]) {
+                        seen['f' + card.id]._fav_groups[groups[i]] = true;
+                        continue;
+                    }
                     var animation = (card.genre_ids || []).indexOf(16) >= 0;
                     var jp = card.original_language == 'ja' || (card.origin_country || []).indexOf('JP') >= 0;
-                    if (animation && jp) cards.push(card);
+                    if (!animation || !jp) continue;
+                    card._fav_groups = {};
+                    card._fav_groups[groups[i]] = true;
+                    seen['f' + card.id] = card;
+                    cards.push(card);
                 }
             }
             return cards;
         },
 
-        // «Новые серии»: серия уже доступна с озвучкой и ещё не просмотрена.
-        // Скоуп — списки Shikimori плюс закладки Lampa. Сколько просмотрено:
-        // точное число из списка Shikimori, а для закладок — сколько серий было
-        // при первой встрече тайтла (иначе новую серию от старых не отличить).
-        newEpisodes: function (net, rates, ok) {
+        // Всё, за чем следит пользователь: избранное Lampa любой категории плюс
+        // списки Shikimori. Прогресс — из самой Lampa, доступные серии — из Kodik.
+        tracked: function (net, rates, ok) {
             var self = this;
-            if (!Kodik.enabled()) return ok([]);
+            var favorites = this.lampaFavorites();
+            var mals = (rates && rates.mals) || {};
+            var watching = (rates && rates.watching) || [];
+
+            if (!Kodik.enabled()) return reverse({});
 
             Kodik.feed(net, function (rows) {
-                withFeed(Kodik.mergeRows(rows));
+                lookup(Kodik.mergeRows(rows));
             }, function () {
-                withFeed({});
+                lookup({});
             });
 
-            function withFeed(fresh) {
+            // Точечно добираем онгоинги из «Я смотрю», которых не было в суточной ленте
+            function lookup(fresh) {
                 var store = Kodik.store();
-                var watching = (rates && rates.watching) || [];
                 var unknown = [];
-
-                // Точечно добираем только онгоинги: у завершённых тайтлов озвучка
-                // вышла давно, в «Новые серии» они всё равно не попадут
                 for (var i = 0; i < watching.length; i++) {
                     var sid = parseInt(watching[i].malId || watching[i].id, 10);
                     if (!sid || watching[i].status != 'ongoing') continue;
                     if (!fresh['s' + sid] && !store['s' + sid]) unknown.push(sid);
                 }
-
-                if (!unknown.length) return build(fresh);
-
+                if (!unknown.length) return reverse(Kodik.remember(fresh));
                 Kodik.lookup(net, unknown, function (found) {
                     for (var key in found) fresh[key] = found[key];
-                    build(fresh);
+                    reverse(Kodik.remember(fresh));
                 });
             }
 
-            function build(fresh) {
-                var known = Kodik.remember(fresh);
-                var mals = (rates && rates.mals) || {};
-                var favorites = self.lampaFavorites();
+            // Закладки -> id Shikimori: в TMDB один сериал на все сезоны,
+            // а в Shikimori каждый сезон — отдельный тайтл
+            function reverse(known) {
+                if (!favorites.length) return finish(known, {});
+                var ids = [];
+                for (var i = 0; i < favorites.length; i++) ids.push(favorites[i].id);
+                Match.reverse(net, ids, function (map) {
+                    finish(known, map);
+                });
+            }
 
-                var mine = [];   // тайтлы из списков Shikimori — их видно сразу
-                var need = [];   // остальное имеет смысл сверять с закладками
-                for (var key in known) {
-                    var sid = known[key] && known[key].sid;
-                    if (!sid) continue;
-                    if (mals[sid]) mine.push(sid);
-                    else if (favorites.length) need.push(sid);
-                }
+            function finish(known, rev) {
+                var items = [];
+                var used = {};
+                var i, j;
 
-                if (!mine.length && !need.length) return ok([]);
-                if (!need.length) return withMap({});
+                // 1. Закладки Lampa — прогресс берём из отметок самой Lampa
+                for (i = 0; i < favorites.length; i++) {
+                    var card = favorites[i];
+                    var seasons = rev[card.id] || [];
+                    var best = null;
 
-                Match.batch(net, need, withMap);
-
-                function withMap(map) {
-                    var fav_tmdb = {};
-                    for (var i = 0; i < favorites.length; i++) fav_tmdb['t' + favorites[i].id] = favorites[i];
-
-                    var picked = [];
-                    var all = mine.concat(need);
-                    var fresh_after = Date.now() - KODIK_FRESH_DAYS * 86400000;
-
-                    for (i = 0; i < all.length; i++) {
-                        var sid = all[i];
-                        var info = known['s' + sid];
-                        var rate = mals[sid];
-                        var mapped = map[sid];
-                        var fav = mapped ? fav_tmdb['t' + mapped.tmdb] : null;
-                        if (!rate && !fav) continue;
-
-                        // Серия «новая», только если стала доступна недавно. Иначе это
-                        // не новинка, а недосмотренный бэклог — он виден в «Я смотрю»
-                        if (!info.at || info.at < fresh_after) continue;
-
-                        var watched = rate ? (rate.episodes || 0) : (info.base || 0);
-                        var count = info.ep - watched;
-                        if (count <= 0) continue;
-
-                        picked.push({ sid: sid, info: info, count: count, tmdb: mapped || null, fav: fav || null });
+                    // Из всех сезонов берём тот, где озвучка обновлялась позже — это текущий
+                    for (j = 0; j < seasons.length; j++) {
+                        var known_season = known['s' + seasons[j].mal];
+                        if (!known_season) continue;
+                        if (!best || (known_season.at || 0) > (best.info.at || 0)) {
+                            best = { info: known_season, season: seasons[j].season };
+                        }
+                        used['s' + seasons[j].mal] = true;
                     }
 
-                    if (!picked.length) return ok([]);
+                    var total = best ? best.info.ep : 0;
+                    var mark = Progress.lastWatched(card, total);
+                    var watched = mark ? mark.episode : 0;
+                    var fresh = 0;
 
-                    picked.sort(function (a, b) { return (b.info.at || 0) - (a.info.at || 0); });
-                    picked = picked.slice(0, 30);
+                    if (best) {
+                        // Точный счёт возможен, только когда нумерация сезона Lampa
+                        // совпадает с нумерацией Shikimori. Иначе — от базы первой встречи
+                        var aligned = !best.season || !mark || mark.season == best.season;
+                        fresh = (watched && aligned) ? total - watched : total - (best.info.base || total);
+                    }
 
-                    var ids = [];
-                    for (i = 0; i < picked.length; i++) ids.push(picked[i].sid);
-
-                    // Карточки берём с Shikimori — постеры и названия как на остальных экранах
-                    Shiki.animesByIds(net, ids, function (animes) {
-                        var by_id = {};
-                        for (var j = 0; j < animes.length; j++) {
-                            by_id['s' + parseInt(animes[j].malId || animes[j].id, 10)] = animes[j];
-                        }
-
-                        var cards = [];
-                        for (j = 0; j < picked.length; j++) {
-                            var item = picked[j];
-                            var anime = by_id['s' + item.sid];
-                            if (!anime) continue;
-                            anime._kodik = item.info;
-                            anime._kodik_new = item.count;
-                            if (item.tmdb) anime._direct_tmdb = { id: item.tmdb.tmdb, method: item.tmdb.media || 'tv' };
-                            if (item.fav && item.fav.img) anime._fav_img = item.fav.img;
-                            cards.push(anime);
-                        }
-                        ok(cards);
-                    }, function () {
-                        ok([]);
+                    items.push({
+                        card: card,
+                        tmdb: { id: card.id, method: card.name || card.original_name ? 'tv' : 'movie' },
+                        wath: !!(card._fav_groups && card._fav_groups.wath),
+                        kodik: best ? best.info : null,
+                        total: total,
+                        watched: watched,
+                        fresh: fresh > 0 ? fresh : 0,
+                        at: best ? best.info.at : 0
                     });
                 }
+
+                // 2. Списки Shikimori — то, чего в закладках нет
+                for (i = 0; i < watching.length; i++) {
+                    var anime = watching[i];
+                    var sid = parseInt(anime.malId || anime.id, 10);
+                    if (!sid || used['s' + sid]) continue;
+
+                    var info = known['s' + sid];
+                    var rate = mals[sid];
+                    var seen = rate ? (rate.episodes || 0) : 0;
+                    var have = info ? info.ep : (anime.episodesAired || 0);
+
+                    items.push({
+                        card: anime,
+                        tmdb: null,
+                        wath: true,
+                        kodik: info || null,
+                        total: have,
+                        watched: seen,
+                        fresh: have > seen ? have - seen : 0,
+                        at: info ? info.at : 0
+                    });
+                }
+
+                ok(items);
             }
+        },
+
+        // Карточка для отрисовки: прогресс и данные Kodik переносим на объект карточки.
+        // Каждой строке — своя копия: Lampa помечает отрисованный объект `ready`
+        // и во второй строке молча его пропускает (interaction/items/old/line.js)
+        decorate: function (item) {
+            var card = {};
+            for (var key in item.card) card[key] = item.card[key];
+
+            card._kodik = item.kodik || null;
+            card._kodik_new = item.fresh || 0;
+            card._watched_ep = item.watched || 0;
+            card._total_ep = item.total || 0;
+            if (item.tmdb) {
+                card._direct_tmdb = item.tmdb;
+                card._tmdb_card = true;
+            }
+            return card;
         },
 
         // Календарь: серии в ближайшие N дней по моим спискам и закладкам
@@ -1193,10 +1342,38 @@
      * Карточки
      * ============================================================ */
 
-    // Стиль карточек: compact (плотная сетка, по умолчанию) | native (как в Lampa) | poster (крупные)
+    // Стиль карточек: native (как в Lampa, по умолчанию) | compact | poster
     function cardStyle() {
-        var style = storString('shikimori_card_style', 'compact');
-        return ['native', 'compact', 'poster'].indexOf(style) >= 0 ? style : 'compact';
+        var style = storString('shikimori_card_style', 'native');
+        return ['native', 'compact', 'poster'].indexOf(style) >= 0 ? style : 'native';
+    }
+
+    // Одна карточка на весь плагин: данные приходят и от Shikimori, и от TMDB/CUB,
+    // поэтому поля сводим к общему виду, а разметка всегда штатная разметка Lampa
+    function cardView(data) {
+        var tmdb = !!(data.poster_path || data.backdrop_path || data.first_air_date || data.release_date || data._tmdb_card);
+        var title, poster, score, year;
+
+        if (tmdb) {
+            title = data.name || data.title || data.original_name || data.original_title || '';
+            poster = data.img || (data.poster_path ? Lampa.TMDB.image('t/p/w300' + data.poster_path) : '');
+            score = data.vote_average ? parseFloat(data.vote_average) : 0;
+            year = (data.first_air_date || data.release_date || '').slice(0, 4);
+        }
+        else {
+            title = data.russian || data.name || '';
+            poster = Shiki.posterUrl(data);
+            score = data.score ? parseFloat(data.score) : 0;
+            year = data.airedOn && data.airedOn.year ? data.airedOn.year : '';
+        }
+
+        return {
+            title: title,
+            poster: poster,
+            score: score ? score.toFixed(1) : '',
+            year: year || '',
+            kind: tmdb ? '' : data.kind
+        };
     }
 
     // Карточка аниме — на штатной разметке Lampa (.card / .card__vote / .card__new-episode)
@@ -1205,10 +1382,11 @@
 
         this.build = function () {
             var style = cardStyle();
-            var poster = Shiki.posterUrl(data);
-            var title = data.russian || data.name || '';
-            var score = data.score && parseFloat(data.score) ? parseFloat(data.score).toFixed(1) : '';
-            var year = data.airedOn && data.airedOn.year ? data.airedOn.year : '';
+            var view = cardView(data);
+            var poster = view.poster;
+            var title = view.title;
+            var score = view.score;
+            var year = view.year;
 
             this.card = Lampa.Template.js('shikimori_card');
             this.card.classList.add('shikimori-card--' + style);
@@ -1231,8 +1409,8 @@
 
             // Тип показываем только когда это не обычный сериал — иначе бейдж на каждой карточке
             var kind = this.card.querySelector('.card__type');
-            var kind_text = Lampa.Lang.translate('shikimori_kind_' + data.kind);
-            if (data.kind && data.kind != 'tv' && kind_text.indexOf('shikimori_kind') == -1) kind.innerText = kind_text;
+            var kind_text = Lampa.Lang.translate('shikimori_kind_' + view.kind);
+            if (view.kind && view.kind != 'tv' && kind_text.indexOf('shikimori_kind') == -1) kind.innerText = kind_text;
             else kind.classList.add('hide');
 
             // Зелёная плашка «+N серий» — штатный бейдж новой серии Lampa.
@@ -1254,10 +1432,18 @@
             }
             else fresh.classList.add('hide');
 
-            // Метка снизу — штатный marker: у новых серий это номер и студия озвучки,
-            // у календарных карточек — дата ближайшего эфира
+            // Метка снизу — штатный marker. Приоритет: где остановился (это важнее всего),
+            // затем номер вышедшей серии со студией, затем дата ближайшего эфира
             var marker = this.card.querySelector('.card__marker');
-            if (data._kodik) {
+            if (data._watched_ep) {
+                var total = data._total_ep || 0;
+                marker.querySelector('span').innerText = total > data._watched_ep
+                    ? Lampa.Lang.translate('shikimori_progress_on') + ' ' + data._watched_ep + ' ' +
+                      Lampa.Lang.translate('shikimori_progress_of') + ' ' + total
+                    : Lampa.Lang.translate('shikimori_progress_on') + ' ' + data._watched_ep + ' ' +
+                      Lampa.Lang.translate('shikimori_ep');
+            }
+            else if (data._kodik) {
                 var studio = data._kodik.studio ? ' · ' + data._kodik.studio : '';
                 var subs = data._kodik.voice ? '' : ' · ' + Lampa.Lang.translate('shikimori_subtitles');
                 marker.querySelector('span').innerText = data._kodik.ep + ' ' +
@@ -1345,19 +1531,19 @@
                 self.buildLines(lines);
             });
 
-            // 1. Списки пользователя, а следом — новые серии (им нужны списки)
+            // 1. Списки Shikimori (если указан ник), а следом — всё отслеживаемое:
+            // закладки Lampa, прогресс просмотра и доступные серии
             UserData.rates(net, function (rates) {
-                lines.watching = rates.watching;
                 join();
-                fresh(rates);
+                track(rates);
             }, function () {
                 join();
-                fresh(null);
+                track(null);
             });
 
-            function fresh(rates) {
-                UserData.newEpisodes(net, rates, function (cards) {
-                    lines.fresh = cards;
+            function track(rates) {
+                UserData.tracked(net, rates, function (items) {
+                    lines.tracked = items;
                     join();
                 });
             }
@@ -1447,11 +1633,23 @@
                 cardClass: function (elem) { return new ActionCard(elem); }
             });
 
-            // Новые серии — уже вышли с озвучкой и не просмотрены (Kodik)
-            if (lines.fresh && lines.fresh.length) {
+            var tracked = lines.tracked || [];
+            var i;
+
+            // Новые серии — доступны с озвучкой, не просмотрены и появились недавно
+            var fresh_after = Date.now() - KODIK_FRESH_DAYS * 86400000;
+            var fresh = [];
+            for (i = 0; i < tracked.length; i++) {
+                if (tracked[i].fresh > 0 && tracked[i].at >= fresh_after) fresh.push(tracked[i]);
+            }
+            fresh.sort(function (a, b) { return b.at - a.at; });
+
+            if (fresh.length) {
+                var fresh_cards = [];
+                for (i = 0; i < Math.min(fresh.length, 30); i++) fresh_cards.push(UserData.decorate(fresh[i]));
                 data.push({
                     title: Lampa.Lang.translate('shikimori_title_fresh'),
-                    results: lines.fresh,
+                    results: fresh_cards,
                     shiki: true,
                     noimage: true,
                     nomore: true,
@@ -1459,28 +1657,36 @@
                 });
             }
 
-            // Я смотрю
-            if (lines.watching && lines.watching.length) {
-                var watching = lines.watching.slice(0);
-                watching.sort(function (a, b) {
-                    var an = (a.episodesAired || 0) - (a._rate_episodes || 0);
-                    var bn = (b.episodesAired || 0) - (b._rate_episodes || 0);
-                    return (bn > 0 ? 1 : 0) - (an > 0 ? 1 : 0);
-                });
+            // Я смотрю — «Смотрю» из закладок Lampa плюс списки Shikimori.
+            // Сверху то, где есть новые серии, дальше — по прогрессу
+            var watching = [];
+            for (i = 0; i < tracked.length; i++) {
+                if (tracked[i].wath) watching.push(tracked[i]);
+            }
+            watching.sort(function (a, b) {
+                if ((b.fresh > 0 ? 1 : 0) != (a.fresh > 0 ? 1 : 0)) return (b.fresh > 0 ? 1 : 0) - (a.fresh > 0 ? 1 : 0);
+                if (b.at != a.at) return b.at - a.at;
+                return (b.watched > 0 ? 1 : 0) - (a.watched > 0 ? 1 : 0);
+            });
+
+            if (watching.length) {
+                var watching_cards = [];
+                for (i = 0; i < watching.length; i++) watching_cards.push(UserData.decorate(watching[i]));
                 data.push({
                     title: Lampa.Lang.translate('shikimori_title_watching'),
-                    results: watching,
+                    results: watching_cards,
                     shiki: true,
                     noimage: true,
-                    onMore: function () { openCatalog({ mode: 'mylist' }); },
+                    onMore: nick ? function () { openCatalog({ mode: 'mylist' }); } : null,
+                    nomore: !nick,
                     cardClass: function (elem) { return new ShikiCard(elem); }
                 });
             }
 
-            // Скоро новые серии
+            // Скоро выйдут
             if (lines.upcoming && lines.upcoming.length) {
                 var upcoming_cards = [];
-                for (var i = 0; i < lines.upcoming.length; i++) {
+                for (i = 0; i < lines.upcoming.length; i++) {
                     upcoming_cards.push(upcomingToCard(lines.upcoming[i]));
                 }
                 data.push({
@@ -1493,12 +1699,23 @@
                 });
             }
 
-            // Сейчас смотрят в Lampa (стандартные TMDB-карточки)
+            // Сейчас смотрят в Lampa. Карточки TMDB, но рисуем их своим классом:
+            // на одном экране все строки должны выглядеть одинаково
             if (lines.popular && lines.popular.length) {
+                for (i = 0; i < lines.popular.length; i++) {
+                    lines.popular[i]._tmdb_card = true;
+                    lines.popular[i]._direct_tmdb = {
+                        id: lines.popular[i].id,
+                        method: lines.popular[i].name || lines.popular[i].original_name ? 'tv' : 'movie'
+                    };
+                }
                 data.push({
                     title: Lampa.Lang.translate(lines.popular_cub ? 'shikimori_title_popular_cub' : 'shikimori_title_popular_tmdb'),
                     results: lines.popular,
-                    nomore: true
+                    shiki: true,
+                    noimage: true,
+                    nomore: true,
+                    cardClass: function (elem) { return new ShikiCard(elem); }
                 });
             }
 
@@ -2254,7 +2471,7 @@
                     compact: Lampa.Lang.translate('shikimori_style_compact'),
                     poster: Lampa.Lang.translate('shikimori_style_poster')
                 },
-                default: 'compact'
+                default: 'native'
             },
             field: {
                 name: Lampa.Lang.translate('shikimori_settings_style'),
@@ -2458,6 +2675,8 @@
             shikimori_settings_uncensored: { ru: 'Показывать 18+', en: 'Show 18+', uk: 'Показувати 18+' },
             shikimori_settings_uncensored_descr: { ru: 'Отключает фильтр цензуры Shikimori', en: 'Disables Shikimori censorship filter', uk: 'Вимикає фільтр цензури Shikimori' },
             shikimori_subtitles: { ru: 'субтитры', en: 'subtitles', uk: 'субтитри' },
+            shikimori_progress_on: { ru: 'Вы на', en: 'You are on', uk: 'Ви на' },
+            shikimori_progress_of: { ru: 'из', en: 'of', uk: 'з' },
             shikimori_settings_kodik: { ru: 'Строка «Новые серии»', en: 'New episodes row', uk: 'Рядок «Нові серії»' },
             shikimori_settings_kodik_descr: { ru: 'Серии, которые уже вышли с озвучкой (данные Kodik). Выключено — останутся только даты эфира в Японии', en: 'Episodes already released with a dub (Kodik). Off — Japanese air dates only', uk: 'Серії, що вже вийшли з озвучкою (Kodik)' },
             shikimori_settings_kodik_subs: { ru: 'Засчитывать субтитры', en: 'Count subtitles', uk: 'Зараховувати субтитри' },
@@ -2538,8 +2757,9 @@
             '.shikimori-action__icon{display:block;width:1.4em;height:1.4em;margin-right:0.7em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
             '.shikimori-action__icon svg{display:block;width:100%;height:100%}' +
             '.shikimori-action__title{white-space:nowrap;background:none!important;padding:0!important}' +
-            // варианты плотности карточек
-            '.shikimori-card--native .card__title{-webkit-line-clamp:2;line-clamp:2;max-height:2.5em}' +
+            // Вид по умолчанию — ровно штатная карточка Lampa: никаких переопределений
+            // размеров, чтобы строки плагина и строки приложения совпадали.
+            // .card__promo — элемент самого плагина, он нужен только крупным постерам
             '.shikimori-card--native .card__promo{display:none}' +
             '.shikimori-card--compact{width:9.5em}' +
             '.shikimori-card--compact .card__title{font-size:1.05em;-webkit-line-clamp:1;line-clamp:1;max-height:1.4em}' +
