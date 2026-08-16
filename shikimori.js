@@ -39,6 +39,7 @@
     var KODIK_FRESH_DAYS = 14;                // «новой» серия считается столько дней
     var REVERSE_MAX = 40;                     // обратных запросов TMDB->MAL за обновление
     var REVERSE_PARALLEL = 4;                 // и сколько из них одновременно
+    var FAVORITES_WAIT = 2500;                // ждём синхронизацию закладок аккаунта, мс
 
     var manifest = {
         type: 'video',
@@ -612,6 +613,24 @@
         }
     };
 
+    // Похоже ли на аниме. Закладка Lampa проходит через Utils.clearCard и хранит
+    // только поля из белого списка: если тайтл добавляли с полной карточки, там
+    // genres:[{id}], а не genre_ids, и жанр в закладке теряется. Поэтому смотрим
+    // оба поля, а признаки берём по «или» — окончательно решает маппинг в
+    // Shikimori: у не-аниме его просто не найдётся
+    function looksLikeAnime(card) {
+        var ids = card.genre_ids || [];
+        if (!ids.length && card.genres && card.genres.length) {
+            ids = [];
+            for (var i = 0; i < card.genres.length; i++) {
+                if (card.genres[i]) ids.push(card.genres[i].id);
+            }
+        }
+        var animation = ids.indexOf(16) >= 0;
+        var jp = card.original_language == 'ja' || (card.origin_country || []).indexOf('JP') >= 0;
+        return animation || jp;
+    }
+
     /* ============================================================
      * Прогресс просмотра — по данным самой Lampa
      * ------------------------------------------------------------
@@ -1113,9 +1132,7 @@
                         seen['f' + card.id]._fav_groups[groups[i]] = true;
                         continue;
                     }
-                    var animation = (card.genre_ids || []).indexOf(16) >= 0;
-                    var jp = card.original_language == 'ja' || (card.origin_country || []).indexOf('JP') >= 0;
-                    if (!animation || !jp) continue;
+                    if (!looksLikeAnime(card)) continue;
                     card._fav_groups = {};
                     card._fav_groups[groups[i]] = true;
                     seen['f' + card.id] = card;
@@ -1125,20 +1142,60 @@
             return cards;
         },
 
+        // При включённом аккаунте закладки приезжают асинхронно: сперва из кэша,
+        // потом с сервера. Если на момент сборки их ещё нет — ждём событие,
+        // но недолго, иначе экран будет пустым у тех, у кого закладок правда нет
+        favorites: function (ok) {
+            var self = this;
+            var list = this.lampaFavorites();
+            if (list.length) return ok(list);
+
+            var logged = false;
+            try {
+                logged = !!(Lampa.Account &&
+                    ((typeof Lampa.Account.logged == 'function' && Lampa.Account.logged()) ||
+                     (Lampa.Account.Permit && Lampa.Account.Permit.sync)));
+            }
+            catch (e) {}
+            if (!logged) return ok(list);
+
+            var done = false;
+            var timer = setTimeout(finish, FAVORITES_WAIT);
+
+            function listener(e) {
+                if (e && e.target == 'favorite') finish();
+            }
+
+            try { Lampa.Listener.follow('state:changed', listener); }
+            catch (e) { return finish(); }
+
+            function finish() {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                try { Lampa.Listener.remove('state:changed', listener); } catch (e) {}
+                ok(self.lampaFavorites());
+            }
+        },
+
         // Всё, за чем следит пользователь: избранное Lampa любой категории плюс
         // списки Shikimori. Прогресс — из самой Lampa, доступные серии — из Kodik.
         tracked: function (net, rates, ok) {
             var self = this;
-            var favorites = this.lampaFavorites();
+            var favorites = [];
             var mals = (rates && rates.mals) || {};
             var watching = (rates && rates.watching) || [];
 
-            if (!Kodik.enabled()) return reverse({});
+            this.favorites(function (list) {
+                favorites = list;
 
-            Kodik.feed(net, function (rows) {
-                lookup(Kodik.mergeRows(rows));
-            }, function () {
-                lookup({});
+                if (!Kodik.enabled()) return reverse({});
+
+                Kodik.feed(net, function (rows) {
+                    lookup(Kodik.mergeRows(rows));
+                }, function () {
+                    lookup({});
+                });
             });
 
             // Точечно добираем онгоинги из «Я смотрю», которых не было в суточной ленте
