@@ -1481,6 +1481,13 @@
             this.card.addEventListener('hover:enter', function () {
                 if (self.onEnter) self.onEnter(self.card, data);
             });
+
+            // Без этого карточки, дорисованные лентой при прокрутке, не попадают
+            // в коллекцию Navigator: Line вешает onVisible именно на это событие,
+            // и с пульта фокус упирается в последнюю изначально отрисованную карточку
+            this.card.addEventListener('visible', function () {
+                if (self.onVisible) self.onVisible(self.card, data);
+            });
         };
 
         this.render = function (js) {
@@ -1913,12 +1920,16 @@
                 else Navigator.move('up');
             };
 
-            this.load(true);
-
             if (object.open_search) {
+                // Первую загрузку запускает сама клавиатура. Иначе ответ приходит,
+                // пока клавиатура открыта, и ready() -> activity.toggle() забирает
+                // у неё фокус: дальше стрелки управляют сеткой, а оверлей уже не
+                // закрыть. Задержку убирать нельзя — Activity.push() сразу после
+                // create() синхронно делает Controller.toggle('content')
                 object.open_search = false;
                 setTimeout(function () { self.searchInput(); }, 300);
             }
+            else this.load(true);
 
             return this.render();
         };
