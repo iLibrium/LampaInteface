@@ -1432,16 +1432,27 @@
             }
             else fresh.classList.add('hide');
 
-            // Метка снизу — штатный marker. Приоритет: где остановился (это важнее всего),
-            // затем номер вышедшей серии со студией, затем дата ближайшего эфира
+            // Полоса прогресса по нижней кромке постера. Доля просмотренного читается
+            // мгновенно и не зависит от того, двузначный номер серии или четырёхзначный
+            var bar = this.card.querySelector('.shikimori-progress');
+            if (data._watched_ep && data._total_ep) {
+                var share = Math.round(data._watched_ep / data._total_ep * 100);
+                // Пока есть недосмотренные серии, полоса не должна выглядеть полной:
+                // у длинных тайтлов 1170 из 1173 округляется ровно в 100%
+                if (data._watched_ep < data._total_ep) share = Math.min(share, 97);
+                share = Math.min(100, share);
+                bar.querySelector('i').style.width = share + '%';
+                this.card.classList.add('shikimori-card--progress');
+            }
+            else bar.classList.add('hide');
+
+            // Метка снизу слева. Приоритет: где остановился, затем вышедшая серия
+            // со студией, затем дата ближайшего эфира
             var marker = this.card.querySelector('.card__marker');
             if (data._watched_ep) {
-                var total = data._total_ep || 0;
-                marker.querySelector('span').innerText = total > data._watched_ep
-                    ? Lampa.Lang.translate('shikimori_progress_on') + ' ' + data._watched_ep + ' ' +
-                      Lampa.Lang.translate('shikimori_progress_of') + ' ' + total
-                    : Lampa.Lang.translate('shikimori_progress_on') + ' ' + data._watched_ep + ' ' +
-                      Lampa.Lang.translate('shikimori_ep');
+                marker.querySelector('span').innerText = data._total_ep > data._watched_ep
+                    ? data._watched_ep + ' / ' + data._total_ep
+                    : data._watched_ep + ' ' + Lampa.Lang.translate('shikimori_ep');
             }
             else if (data._kodik) {
                 var studio = data._kodik.studio ? ' · ' + data._kodik.studio : '';
@@ -2675,8 +2686,6 @@
             shikimori_settings_uncensored: { ru: 'Показывать 18+', en: 'Show 18+', uk: 'Показувати 18+' },
             shikimori_settings_uncensored_descr: { ru: 'Отключает фильтр цензуры Shikimori', en: 'Disables Shikimori censorship filter', uk: 'Вимикає фільтр цензури Shikimori' },
             shikimori_subtitles: { ru: 'субтитры', en: 'subtitles', uk: 'субтитри' },
-            shikimori_progress_on: { ru: 'Вы на', en: 'You are on', uk: 'Ви на' },
-            shikimori_progress_of: { ru: 'из', en: 'of', uk: 'з' },
             shikimori_settings_kodik: { ru: 'Строка «Новые серии»', en: 'New episodes row', uk: 'Рядок «Нові серії»' },
             shikimori_settings_kodik_descr: { ru: 'Серии, которые уже вышли с озвучкой (данные Kodik). Выключено — останутся только даты эфира в Японии', en: 'Episodes already released with a dub (Kodik). Off — Japanese air dates only', uk: 'Серії, що вже вийшли з озвучкою (Kodik)' },
             shikimori_settings_kodik_subs: { ru: 'Засчитывать субтитры', en: 'Count subtitles', uk: 'Зараховувати субтитри' },
@@ -2730,6 +2739,7 @@
                     '<div class="card__vote"></div>' +
                     '<div class="card__marker"><span></span></div>' +
                     '<div class="card__new-episode"><div></div></div>' +
+                    '<div class="shikimori-progress"><i></i></div>' +
                     '<div class="card__promo"><div class="card__promo-title"></div></div>' +
                 '</div>' +
                 '<div class="card__title"></div>' +
@@ -2757,12 +2767,23 @@
             '.shikimori-action__icon{display:block;width:1.4em;height:1.4em;margin-right:0.7em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
             '.shikimori-action__icon svg{display:block;width:100%;height:100%}' +
             '.shikimori-action__title{white-space:nowrap;background:none!important;padding:0!important}' +
-            // Вид по умолчанию — ровно штатная карточка Lampa: никаких переопределений
-            // размеров, чтобы строки плагина и строки приложения совпадали.
+            // Вид по умолчанию — ровно штатная карточка Lampa: размеры не трогаем,
+            // чтобы строки плагина и строки приложения совпадали.
             // .card__promo — элемент самого плагина, он нужен только крупным постерам
             '.shikimori-card--native .card__promo{display:none}' +
+            // Углы постера — четыре независимых слота: они не могут пересечься.
+            // Штатный «+N» растянут во всю ширину по низу и налезает на маркер с рейтингом
+            '.shikimori-card .card__new-episode{left:auto;right:0.4em;bottom:auto;top:0.5em;text-align:right}' +
+            // Ровная нижняя кромка строки: резервируем место под заголовок и год,
+            // иначе высота карточки скачет на 50-70px из-за длины названия
+            '.shikimori-card .card__title{min-height:3.6em}' +
+            '.shikimori-card .card__age{min-height:1.2em}' +
+            // Прогресс просмотра
+            '.shikimori-progress{position:absolute;left:0;right:0;bottom:0;height:0.35em;background:rgba(0,0,0,0.55);border-radius:0 0 1em 1em;overflow:hidden;z-index:1}' +
+            '.shikimori-progress i{display:block;height:100%;width:0;background:#57F570}' +
+            '.shikimori-card--progress .card__vote,.shikimori-card--progress .card__marker{bottom:0.75em}' +
             '.shikimori-card--compact{width:9.5em}' +
-            '.shikimori-card--compact .card__title{font-size:1.05em;-webkit-line-clamp:1;line-clamp:1;max-height:1.4em}' +
+            '.shikimori-card--compact .card__title{font-size:1.05em;-webkit-line-clamp:1;line-clamp:1;max-height:1.4em;min-height:1.4em}' +
             '.shikimori-card--compact .card__age{display:none}' +
             '.shikimori-card--compact .card__promo{display:none}' +
             '.shikimori-card--compact .card__vote{font-size:1em}' +
