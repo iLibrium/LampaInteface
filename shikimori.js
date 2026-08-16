@@ -24,6 +24,20 @@
     var MATCH_NEG_TTL = 3 * 24 * 60 * 60 * 1000; // отрицательный кэш: 3 дня
     var GENRES_TTL = 24 * 60 * 60 * 1000;     // кэш жанров: сутки
 
+    // Kodik — источник «серия уже доступна с озвучкой». Адрес и токен переопределяются
+    // в настройках: домен уже переезжал (kodikapi.com отключён регистратором 20.03.2026),
+    // а токены — общий публичный пул, они регулярно умирают.
+    var KODIK_HOST = 'kodik-api.com';
+    var KODIK_TOKENS = [
+        '56a768d08f43091901c44b54fe970049',
+        '41dd95f84c21719b09d6c71182237a25',
+        '77b567ec164db6ca9162d2f3dc4948c3'
+    ];
+    var KODIK_TTL = 30 * 60 * 1000;           // кэш ленты Kodik: 30 минут
+    var KODIK_PAGES = 2;                      // 2 страницы по 100 строк ~ сутки релизов
+    var KODIK_LOOKUP_MAX = 8;                 // точечных запросов за обновление — не больше
+    var KODIK_FRESH_DAYS = 14;                // «новой» серия считается столько дней
+
     var manifest = {
         type: 'video',
         version: VERSION,
@@ -46,6 +60,13 @@
         if (typeof value != 'string') return def;
         value = value.replace(/^\s+|\s+$/g, '').replace(/^["']|["']$/g, '');
         return value || def;
+    }
+
+    // Переключатель: Storage может вернуть строку "true"/"false" вместо булева
+    function storBool(name, def) {
+        var value = Lampa.Storage.get(name, def);
+        if (typeof value == 'string') return value.replace(/["'\s]/g, '') == 'true';
+        return value === true;
     }
 
     function storSet(name, value) {
@@ -262,7 +283,7 @@
             if (params.genre) args.push('genre: ' + JSON.stringify(params.genre));
             if (params.score) args.push('score: ' + parseInt(params.score, 10));
             if (params.search) args.push('search: ' + JSON.stringify(params.search));
-            if (!storGet('shikimori_uncensored', false)) args.push('censored: true');
+            if (!storBool('shikimori_uncensored', false)) args.push('censored: true');
             return args.join(', ');
         },
 
@@ -390,6 +411,202 @@
                 return img.indexOf('http') == 0 ? img : SHIKI_BASE + img;
             }
             return SHIKI_BASE + '/system/animes/original/' + (anime.id || '0') + '.jpg';
+        }
+    };
+
+    /* ============================================================
+     * Kodik — серии, которые уже доступны с русской озвучкой
+     * ------------------------------------------------------------
+     * Shikimori даёт дату эфира в Японии, а не «можно посмотреть с озвучкой».
+     * Kodik ищет напрямую по shikimori_id и отдаёт last_episode по каждой студии.
+     * Ограничения API (проверены живьём):
+     *   - OPTIONS-преflight отвечает 500 -> только простой GET без своих заголовков;
+     *   - ответы с ошибкой приходят без CORS, в браузере это неотличимо от сетевого
+     *     сбоя -> любая неудача трактуется как «токен мёртв, пробуем следующий»;
+     *   - limit жёстко ограничен сотней, next_page — готовый абсолютный адрес.
+     * ============================================================ */
+
+    var Kodik = {
+        feed_cache: null,
+        feed_time: 0,
+        token_index: 0,
+        active_token: '',
+
+        host: function () {
+            var host = storString('shikimori_kodik_host', KODIK_HOST);
+            return host.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+        },
+
+        // Свой токен из настроек — первым, встроенный пул — резервом
+        tokens: function () {
+            var own = storString('shikimori_kodik_token', '');
+            var list = own ? [own] : [];
+            for (var i = 0; i < KODIK_TOKENS.length; i++) {
+                if (KODIK_TOKENS[i] != own) list.push(KODIK_TOKENS[i]);
+            }
+            return list;
+        },
+
+        enabled: function () {
+            return storBool('shikimori_kodik', true);
+        },
+
+        withSubtitles: function () {
+            return storBool('shikimori_kodik_subs', false);
+        },
+
+        request: function (net, path, params, ok, err) {
+            var self = this;
+            var tokens = this.tokens();
+            var base = this.token_index;
+            var attempt = 0;
+
+            function tryToken() {
+                if (attempt >= tokens.length) return err('kodik_dead');
+                var index = (base + attempt) % tokens.length;
+                attempt++;
+                var url = 'https://' + self.host() + path +
+                    '?token=' + encodeURIComponent(tokens[index]) + params;
+                net.get(url, function (json) {
+                    if (json && json.results) {
+                        self.token_index = index;
+                        self.active_token = tokens[index];
+                        ok(json);
+                    }
+                    else tryToken();
+                }, tryToken);
+            }
+
+            tryToken();
+        },
+
+        // Лента обновлений: KODIK_PAGES страниц по 100 строк
+        feed: function (net, ok, err) {
+            var self = this;
+            if (this.feed_cache && Date.now() - this.feed_time < KODIK_TTL) return ok(this.feed_cache);
+
+            var rows = [];
+            var params = '&types=anime-serial&anime_status=ongoing&sort=updated_at&limit=100&with_material_data=true' +
+                (this.withSubtitles() ? '' : '&translation_type=voice');
+
+            this.request(net, '/list', params, function (json) {
+                rows = rows.concat(json.results || []);
+                page(json.next_page, 1);
+            }, err);
+
+            function page(next_url, depth) {
+                if (!next_url || depth >= KODIK_PAGES) return finish();
+                if (next_url.indexOf('token=') == -1 && self.active_token) {
+                    next_url += '&token=' + encodeURIComponent(self.active_token);
+                }
+                net.get(next_url, function (json) {
+                    if (json && json.results) rows = rows.concat(json.results);
+                    // дальше не идём: следующая страница уходит за сутки
+                    finish();
+                }, finish);
+            }
+
+            function finish() {
+                self.feed_cache = rows;
+                self.feed_time = Date.now();
+                ok(rows);
+            }
+        },
+
+        // Точечный запрос по конкретным тайтлам — чтобы узнать про то,
+        // что не попало в суточную ленту. Количество запросов ограничено.
+        lookup: function (net, ids, ok) {
+            var self = this;
+            var result = {};
+            var index = 0;
+            var limit = Math.min(ids.length, KODIK_LOOKUP_MAX);
+
+            function next() {
+                if (index >= limit) return ok(result);
+                var sid = ids[index++];
+                self.request(net, '/search', '&shikimori_id=' + sid + '&with_material_data=true', function (json) {
+                    var merged = self.mergeRows(json.results || []);
+                    for (var key in merged) result[key] = merged[key];
+                    next();
+                }, next);
+            }
+
+            next();
+        },
+
+        // Строка Kodik = (тайтл × студия). Схлопываем в одну запись на тайтл:
+        // больше серий важнее, при равенстве озвучка важнее субтитров.
+        mergeRows: function (rows) {
+            var map = {};
+            for (var i = 0; i < rows.length; i++) {
+                var row = rows[i];
+                var sid = parseInt(row.shikimori_id, 10);
+                // episodes_count — сколько серий у студии, а не номер серии; нужен last_episode
+                var ep = parseInt(row.last_episode, 10) || 0;
+                if (!sid || !ep) continue;
+
+                var voice = !row.translation || row.translation.type != 'subtitles';
+                var key = 's' + sid;
+                var prev = map[key];
+                if (prev && !(ep > prev.ep || (ep == prev.ep && voice && !prev.voice))) continue;
+
+                map[key] = {
+                    sid: sid,
+                    ep: ep,
+                    voice: voice,
+                    studio: (row.translation && row.translation.title) || '',
+                    at: parseISO(row.updated_at),
+                    aired: (row.material_data && parseInt(row.material_data.episodes_aired, 10)) || 0
+                };
+            }
+            return map;
+        },
+
+        // Постоянное хранилище: что мы уже знали про каждый тайтл.
+        // base — сколько серий было при первой встрече; для закладок без списка
+        // Shikimori только по нему и можно понять, что серия именно новая.
+        store: function () {
+            var store = storGet('shikimori_kodik_eps', {});
+            return store && typeof store == 'object' ? store : {};
+        },
+
+        remember: function (fresh) {
+            var store = this.store();
+            var changed = false;
+
+            for (var key in fresh) {
+                var next = fresh[key];
+                var prev = store[key];
+                // at — момент, когда серий стало больше. Переоцифровка тайтла тоже
+                // двигает updated_at, но новой серией это не является
+                if (prev && next.ep <= prev.ep) continue;
+                store[key] = {
+                    sid: next.sid,
+                    ep: next.ep,
+                    base: prev ? prev.base : next.ep,
+                    studio: next.studio,
+                    voice: next.voice,
+                    at: next.at,
+                    aired: next.aired
+                };
+                changed = true;
+            }
+
+            var keys = [];
+            for (var k in store) keys.push(k);
+            if (keys.length > 400) {
+                keys.sort(function (a, b) { return (store[a].at || 0) - (store[b].at || 0); });
+                for (var i = 0; i < keys.length - 400; i++) delete store[keys[i]];
+                changed = true;
+            }
+
+            if (changed) storSet('shikimori_kodik_eps', store);
+            return store;
+        },
+
+        dropCache: function () {
+            this.feed_cache = null;
+            this.feed_time = 0;
         }
     };
 
@@ -777,6 +994,121 @@
             return cards;
         },
 
+        // «Новые серии»: серия уже доступна с озвучкой и ещё не просмотрена.
+        // Скоуп — списки Shikimori плюс закладки Lampa. Сколько просмотрено:
+        // точное число из списка Shikimori, а для закладок — сколько серий было
+        // при первой встрече тайтла (иначе новую серию от старых не отличить).
+        newEpisodes: function (net, rates, ok) {
+            var self = this;
+            if (!Kodik.enabled()) return ok([]);
+
+            Kodik.feed(net, function (rows) {
+                withFeed(Kodik.mergeRows(rows));
+            }, function () {
+                withFeed({});
+            });
+
+            function withFeed(fresh) {
+                var store = Kodik.store();
+                var watching = (rates && rates.watching) || [];
+                var unknown = [];
+
+                // Точечно добираем только онгоинги: у завершённых тайтлов озвучка
+                // вышла давно, в «Новые серии» они всё равно не попадут
+                for (var i = 0; i < watching.length; i++) {
+                    var sid = parseInt(watching[i].malId || watching[i].id, 10);
+                    if (!sid || watching[i].status != 'ongoing') continue;
+                    if (!fresh['s' + sid] && !store['s' + sid]) unknown.push(sid);
+                }
+
+                if (!unknown.length) return build(fresh);
+
+                Kodik.lookup(net, unknown, function (found) {
+                    for (var key in found) fresh[key] = found[key];
+                    build(fresh);
+                });
+            }
+
+            function build(fresh) {
+                var known = Kodik.remember(fresh);
+                var mals = (rates && rates.mals) || {};
+                var favorites = self.lampaFavorites();
+
+                var mine = [];   // тайтлы из списков Shikimori — их видно сразу
+                var need = [];   // остальное имеет смысл сверять с закладками
+                for (var key in known) {
+                    var sid = known[key] && known[key].sid;
+                    if (!sid) continue;
+                    if (mals[sid]) mine.push(sid);
+                    else if (favorites.length) need.push(sid);
+                }
+
+                if (!mine.length && !need.length) return ok([]);
+                if (!need.length) return withMap({});
+
+                Match.batch(net, need, withMap);
+
+                function withMap(map) {
+                    var fav_tmdb = {};
+                    for (var i = 0; i < favorites.length; i++) fav_tmdb['t' + favorites[i].id] = favorites[i];
+
+                    var picked = [];
+                    var all = mine.concat(need);
+                    var fresh_after = Date.now() - KODIK_FRESH_DAYS * 86400000;
+
+                    for (i = 0; i < all.length; i++) {
+                        var sid = all[i];
+                        var info = known['s' + sid];
+                        var rate = mals[sid];
+                        var mapped = map[sid];
+                        var fav = mapped ? fav_tmdb['t' + mapped.tmdb] : null;
+                        if (!rate && !fav) continue;
+
+                        // Серия «новая», только если стала доступна недавно. Иначе это
+                        // не новинка, а недосмотренный бэклог — он виден в «Я смотрю»
+                        if (!info.at || info.at < fresh_after) continue;
+
+                        var watched = rate ? (rate.episodes || 0) : (info.base || 0);
+                        var count = info.ep - watched;
+                        if (count <= 0) continue;
+
+                        picked.push({ sid: sid, info: info, count: count, tmdb: mapped || null, fav: fav || null });
+                    }
+
+                    if (!picked.length) return ok([]);
+
+                    picked.sort(function (a, b) { return (b.info.at || 0) - (a.info.at || 0); });
+                    picked = picked.slice(0, 30);
+
+                    var ids = [];
+                    for (i = 0; i < picked.length; i++) ids.push(picked[i].sid);
+
+                    // Карточки берём с Shikimori — постеры и названия как на остальных экранах
+                    Shiki.animesByIds(net, ids, function (animes) {
+                        var by_id = {};
+                        for (var j = 0; j < animes.length; j++) {
+                            by_id['s' + parseInt(animes[j].malId || animes[j].id, 10)] = animes[j];
+                        }
+
+                        var cards = [];
+                        for (j = 0; j < picked.length; j++) {
+                            var item = picked[j];
+                            var anime = by_id['s' + item.sid];
+                            if (!anime) continue;
+                            anime._kodik = item.info;
+                            anime._kodik_new = item.count;
+                            if (item.tmdb) anime._direct_tmdb = { id: item.tmdb.tmdb, method: item.tmdb.media || 'tv' };
+                            if (item.fav && item.fav.img) anime._fav_img = item.fav.img;
+                            cards.push(anime);
+                        }
+                        ok(cards);
+                    }, function () {
+                        ok([]);
+                    });
+                }
+            }
+        },
+
         // Календарь: серии в ближайшие N дней по моим спискам и закладкам
         upcoming: function (net, ok, err) {
             var self = this;
@@ -861,10 +1193,10 @@
      * Карточки
      * ============================================================ */
 
-    // Стиль карточек: native (как в Lampa) | poster (крупные) | compact (плотная сетка)
+    // Стиль карточек: compact (плотная сетка, по умолчанию) | native (как в Lampa) | poster (крупные)
     function cardStyle() {
-        var style = storString('shikimori_card_style', 'native');
-        return ['native', 'compact', 'poster'].indexOf(style) >= 0 ? style : 'native';
+        var style = storString('shikimori_card_style', 'compact');
+        return ['native', 'compact', 'poster'].indexOf(style) >= 0 ? style : 'compact';
     }
 
     // Карточка аниме — на штатной разметке Lampa (.card / .card__vote / .card__new-episode)
@@ -903,10 +1235,14 @@
             if (data.kind && data.kind != 'tv' && kind_text.indexOf('shikimori_kind') == -1) kind.innerText = kind_text;
             else kind.classList.add('hide');
 
-            // Зелёная плашка «+N серий» — штатный бейдж новой серии Lampa
+            // Зелёная плашка «+N серий» — штатный бейдж новой серии Lampa.
+            // Данные Kodik важнее: там серия уже с озвучкой, а не просто вышла в Японии
             var fresh = this.card.querySelector('.card__new-episode');
             var unwatched = 0;
-            if (typeof data._rate_episodes == 'number' && data.episodesAired) {
+            if (data._kodik_new > 0) {
+                unwatched = data._kodik_new;
+            }
+            else if (typeof data._rate_episodes == 'number' && data.episodesAired) {
                 unwatched = data.episodesAired - data._rate_episodes;
             }
             if (unwatched > 0) {
@@ -918,9 +1254,16 @@
             }
             else fresh.classList.add('hide');
 
-            // Метка даты выхода серии — штатный marker
+            // Метка снизу — штатный marker: у новых серий это номер и студия озвучки,
+            // у календарных карточек — дата ближайшего эфира
             var marker = this.card.querySelector('.card__marker');
-            if (data._next_at) {
+            if (data._kodik) {
+                var studio = data._kodik.studio ? ' · ' + data._kodik.studio : '';
+                var subs = data._kodik.voice ? '' : ' · ' + Lampa.Lang.translate('shikimori_subtitles');
+                marker.querySelector('span').innerText = data._kodik.ep + ' ' +
+                    Lampa.Lang.translate('shikimori_ep') + (subs || studio);
+            }
+            else if (data._next_at) {
                 marker.querySelector('span').innerText = formatDate(data._next_at) +
                     (data._next_episode ? ' · ' + data._next_episode + ' ' + Lampa.Lang.translate('shikimori_ep') : '');
             }
@@ -998,17 +1341,26 @@
             this.activity.loader(true);
 
             var lines = {};
-            var join = makeJoin(4, function () {
+            var join = makeJoin(5, function () {
                 self.buildLines(lines);
             });
 
-            // 1. Списки пользователя
+            // 1. Списки пользователя, а следом — новые серии (им нужны списки)
             UserData.rates(net, function (rates) {
                 lines.watching = rates.watching;
                 join();
+                fresh(rates);
             }, function () {
                 join();
+                fresh(null);
             });
+
+            function fresh(rates) {
+                UserData.newEpisodes(net, rates, function (cards) {
+                    lines.fresh = cards;
+                    join();
+                });
+            }
 
             // 2. Календарь (списки + закладки)
             UserData.upcoming(net, function (upcoming) {
@@ -1094,6 +1446,18 @@
                 noimage: true,
                 cardClass: function (elem) { return new ActionCard(elem); }
             });
+
+            // Новые серии — уже вышли с озвучкой и не просмотрены (Kodik)
+            if (lines.fresh && lines.fresh.length) {
+                data.push({
+                    title: Lampa.Lang.translate('shikimori_title_fresh'),
+                    results: lines.fresh,
+                    shiki: true,
+                    noimage: true,
+                    nomore: true,
+                    cardClass: function (elem) { return new ShikiCard(elem); }
+                });
+            }
 
             // Я смотрю
             if (lines.watching && lines.watching.length) {
@@ -1890,7 +2254,7 @@
                     compact: Lampa.Lang.translate('shikimori_style_compact'),
                     poster: Lampa.Lang.translate('shikimori_style_poster')
                 },
-                default: 'native'
+                default: 'compact'
             },
             field: {
                 name: Lampa.Lang.translate('shikimori_settings_style'),
@@ -1908,6 +2272,72 @@
             field: {
                 name: Lampa.Lang.translate('shikimori_settings_uncensored'),
                 description: Lampa.Lang.translate('shikimori_settings_uncensored_descr')
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
+                name: 'shikimori_kodik',
+                type: 'trigger',
+                default: true
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_kodik'),
+                description: Lampa.Lang.translate('shikimori_settings_kodik_descr')
+            },
+            onChange: function () {
+                Kodik.dropCache();
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
+                name: 'shikimori_kodik_subs',
+                type: 'trigger',
+                default: false
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_kodik_subs'),
+                description: Lampa.Lang.translate('shikimori_settings_kodik_subs_descr')
+            },
+            onChange: function () {
+                Kodik.dropCache();
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
+                name: 'shikimori_kodik_host',
+                type: 'input',
+                values: '',
+                default: KODIK_HOST
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_kodik_host'),
+                description: Lampa.Lang.translate('shikimori_settings_kodik_host_descr')
+            },
+            onChange: function () {
+                Kodik.dropCache();
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
+                name: 'shikimori_kodik_token',
+                type: 'input',
+                values: '',
+                default: ''
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_kodik_token'),
+                description: Lampa.Lang.translate('shikimori_settings_kodik_token_descr')
+            },
+            onChange: function () {
+                Kodik.dropCache();
             }
         });
 
@@ -1941,6 +2371,8 @@
                 storSet('shikimori_calendar_cache', null);
                 storSet('shikimori_genres_cache', null);
                 storSet('shikimori_user_id', null);
+                storSet('shikimori_kodik_eps', {});
+                Kodik.dropCache();
                 UserData.dropRatesCache();
                 Lampa.Noty.show(Lampa.Lang.translate('shikimori_settings_cache_cleared'));
             }
@@ -1971,7 +2403,8 @@
 
             shikimori_title_menu: { ru: 'Меню', en: 'Menu', uk: 'Меню' },
             shikimori_title_watching: { ru: 'Я смотрю', en: 'Watching', uk: 'Я дивлюсь' },
-            shikimori_title_upcoming: { ru: 'Скоро новые серии', en: 'Upcoming episodes', uk: 'Скоро нові серії' },
+            shikimori_title_fresh: { ru: 'Новые серии', en: 'New episodes', uk: 'Нові серії' },
+            shikimori_title_upcoming: { ru: 'Скоро выйдут', en: 'Airing soon', uk: 'Скоро вийдуть' },
             shikimori_title_popular_cub: { ru: 'Сейчас смотрят в Lampa', en: 'Now watching in Lampa', uk: 'Зараз дивляться в Lampa' },
             shikimori_title_popular_tmdb: { ru: 'Популярное сейчас', en: 'Popular now', uk: 'Популярне зараз' },
             shikimori_title_ongoing: { ru: 'Популярные онгоинги', en: 'Popular ongoing', uk: 'Популярні онгоінги' },
@@ -2024,6 +2457,15 @@
             shikimori_style_poster: { ru: 'Крупные постеры', en: 'Large posters', uk: 'Великі постери' },
             shikimori_settings_uncensored: { ru: 'Показывать 18+', en: 'Show 18+', uk: 'Показувати 18+' },
             shikimori_settings_uncensored_descr: { ru: 'Отключает фильтр цензуры Shikimori', en: 'Disables Shikimori censorship filter', uk: 'Вимикає фільтр цензури Shikimori' },
+            shikimori_subtitles: { ru: 'субтитры', en: 'subtitles', uk: 'субтитри' },
+            shikimori_settings_kodik: { ru: 'Строка «Новые серии»', en: 'New episodes row', uk: 'Рядок «Нові серії»' },
+            shikimori_settings_kodik_descr: { ru: 'Серии, которые уже вышли с озвучкой (данные Kodik). Выключено — останутся только даты эфира в Японии', en: 'Episodes already released with a dub (Kodik). Off — Japanese air dates only', uk: 'Серії, що вже вийшли з озвучкою (Kodik)' },
+            shikimori_settings_kodik_subs: { ru: 'Засчитывать субтитры', en: 'Count subtitles', uk: 'Зараховувати субтитри' },
+            shikimori_settings_kodik_subs_descr: { ru: 'Показывать серию новой, если вышла только с субтитрами, без озвучки', en: 'Treat subtitle-only releases as new episodes', uk: 'Показувати серію новою, якщо вийшла лише із субтитрами' },
+            shikimori_settings_kodik_host: { ru: 'Адрес Kodik API', en: 'Kodik API host', uk: 'Адреса Kodik API' },
+            shikimori_settings_kodik_host_descr: { ru: 'По умолчанию kodik-api.com. Менять, если домен снова переедет', en: 'Defaults to kodik-api.com. Change if the domain moves again', uk: 'За замовчуванням kodik-api.com' },
+            shikimori_settings_kodik_token: { ru: 'Токен Kodik', en: 'Kodik token', uk: 'Токен Kodik' },
+            shikimori_settings_kodik_token_descr: { ru: 'Свой токен, если встроенные перестали работать. Пустое поле — используются встроенные', en: 'Your own token if the built-in ones stop working', uk: 'Власний токен, якщо вбудовані перестали працювати' },
             shikimori_settings_proxy: { ru: 'CORS-прокси (опционально)', en: 'CORS proxy (optional)', uk: 'CORS-проксі (опціонально)' },
             shikimori_settings_proxy_descr: { ru: 'Например: https://mycorsproxy.example/ — подставляется перед адресом Shikimori, если прямой доступ заблокирован', en: 'Prefix before Shikimori URL if direct access is blocked', uk: 'Префікс перед адресою Shikimori' },
             shikimori_settings_clear_cache: { ru: 'Очистить кэш', en: 'Clear cache', uk: 'Очистити кеш' },
