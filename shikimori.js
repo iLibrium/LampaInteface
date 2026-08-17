@@ -40,6 +40,7 @@
     var REVERSE_MAX = 40;                     // обратных запросов TMDB->MAL за обновление
     var REVERSE_PARALLEL = 4;                 // и сколько из них одновременно
     var FAVORITES_WAIT = 2500;                // ждём синхронизацию закладок аккаунта, мс
+    var BADGE_DELAY = 6000;                   // пересчёт счётчика в меню — после загрузки приложения
 
     var manifest = {
         type: 'video',
@@ -641,13 +642,14 @@
      * ============================================================ */
 
     var Progress = {
-        // До какой серии досмотрено. null — отметок нет
+        // До какой серии досмотрено и когда. null — отметок нет
         lastWatched: function (card, max_ep) {
             var name = card.original_name || card.original_title || '';
             if (!name) return null;
 
             var episode = 0;
             var season = 1;
+            var at = 0;
 
             // 1. Прямая запись «где остановился» от онлайн-балансеров
             try {
@@ -666,6 +668,11 @@
                 if (marks && marks.length) {
                     var top = marks[marks.length - 1];
                     if (top && top.ep > episode) { episode = top.ep; season = 1; }
+                    // Когда включали в последний раз — по самой свежей отметке
+                    for (var m = 0; m < marks.length; m++) {
+                        var upd = marks[m].view && marks[m].view.updated;
+                        if (upd > at) at = upd;
+                    }
                 }
             }
             catch (e) {}
@@ -676,13 +683,17 @@
                 try {
                     for (var ep = max_ep; ep > episode && ep > 24; ep--) {
                         var view = Lampa.Timeline.watchedEpisode(card, season, ep, true);
-                        if (view && view.percent) { episode = ep; break; }
+                        if (view && view.percent) {
+                            episode = ep;
+                            if (view.updated > at) at = view.updated;
+                            break;
+                        }
                     }
                 }
                 catch (e) {}
             }
 
-            return episode ? { episode: episode, season: season } : null;
+            return episode ? { episode: episode, season: season, at: at || 0 } : null;
         }
     };
 
@@ -1266,6 +1277,7 @@
                         kodik: best ? best.info : null,
                         total: total,
                         watched: watched,
+                        watched_at: mark ? mark.at : 0,
                         fresh: fresh > 0 ? fresh : 0,
                         at: best ? best.info.at : 0
                     });
@@ -1706,6 +1718,9 @@
             var tracked = lines.tracked || [];
             var i;
 
+            // Экран открыт — данные свежие, счётчик в меню обновляем заодно
+            updateMenuBadge(tracked);
+
             // Новые серии — доступны с озвучкой, не просмотрены и появились недавно
             var fresh_after = Date.now() - KODIK_FRESH_DAYS * 86400000;
             var fresh = [];
@@ -1839,17 +1854,19 @@
         return comp;
     }
 
-    // Одна категория избранного Lampa -> строка. Сверху то, где есть новые
-    // серии, дальше по свежести, начатое выше нетронутого
+    // Одна категория избранного Lampa -> строка. Порядок как в «Продолжить
+    // просмотр»: что включали последним — то и сверху. Дальше начатое, потом
+    // то, где есть новые серии, и в конце нетронутое
     function favoriteRow(tracked, group) {
         var picked = [];
         for (var i = 0; i < tracked.length; i++) {
             if (tracked[i].groups && tracked[i].groups[group]) picked.push(tracked[i]);
         }
         picked.sort(function (a, b) {
+            if (a.watched_at != b.watched_at) return b.watched_at - a.watched_at;
+            if ((b.watched > 0 ? 1 : 0) != (a.watched > 0 ? 1 : 0)) return (b.watched > 0 ? 1 : 0) - (a.watched > 0 ? 1 : 0);
             if ((b.fresh > 0 ? 1 : 0) != (a.fresh > 0 ? 1 : 0)) return (b.fresh > 0 ? 1 : 0) - (a.fresh > 0 ? 1 : 0);
-            if (b.at != a.at) return b.at - a.at;
-            return (b.watched > 0 ? 1 : 0) - (a.watched > 0 ? 1 : 0);
+            return b.at - a.at;
         });
         return picked;
     }
@@ -2880,6 +2897,8 @@
             '<style>' +
             // сетка каталога
             '.shikimori-catalog{-webkit-box-pack:justify!important;-webkit-justify-content:space-between!important;-ms-flex-pack:justify!important;justify-content:space-between!important}' +
+            // счётчик новых серий на пункте меню
+            '.menu__item .shikimori-badge{margin-left:auto;background:#57F570;color:#17491C;font-size:0.8em;font-weight:700;min-width:1.7em;height:1.7em;line-height:1.7em;text-align:center;border-radius:1em;padding:0 0.4em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
             // неделя в шапке календаря
             '.shikimori-week{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;margin:0 0 1.2em 0}' +
             '.shikimori-week__day{-webkit-box-flex:1;-webkit-flex:1 1 0;-ms-flex:1 1 0;flex:1 1 0;text-align:center;padding:0.7em 0.2em;margin-right:0.5em;border-radius:0.5em;background:rgba(255,255,255,0.08)}' +
@@ -2957,6 +2976,7 @@
         var button = $('<li class="menu__item selector" data-action="shikimori">' +
             '<div class="menu__ico">' + ICON_MENU + '</div>' +
             '<div class="menu__text">' + Lampa.Lang.translate('shikimori_menu') + '</div>' +
+            '<div class="shikimori-badge hide"></div>' +
         '</li>');
 
         button.on('hover:enter', function () {
@@ -2969,6 +2989,43 @@
         });
 
         $('.menu .menu__list').eq(0).append(button);
+
+        // Показываем последнее известное число сразу, не дожидаясь сети
+        paintMenuBadge(parseInt(storGet('shikimori_badge', 0), 10) || 0);
+        setTimeout(refreshMenuBadge, BADGE_DELAY);
+    }
+
+    // Сколько новых серий ждёт — прямо на пункте меню, как непрочитанные в почте
+    function paintMenuBadge(count) {
+        var badge = $('.menu__item[data-action="shikimori"] .shikimori-badge');
+        if (!badge.length) return;
+        if (count > 0) badge.removeClass('hide').text(count > 99 ? '99+' : count);
+        else badge.addClass('hide').text('');
+    }
+
+    function countFresh(items) {
+        var after = Date.now() - KODIK_FRESH_DAYS * 86400000;
+        var count = 0;
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].fresh > 0 && items[i].at >= after) count++;
+        }
+        return count;
+    }
+
+    function updateMenuBadge(items) {
+        var count = countFresh(items);
+        storSet('shikimori_badge', count);
+        paintMenuBadge(count);
+    }
+
+    // Фоновый пересчёт: экран плагина мог и не открываться
+    function refreshMenuBadge() {
+        if (!Kodik.enabled()) return;
+        UserData.rates(background_net, function (rates) {
+            UserData.tracked(background_net, rates, updateMenuBadge);
+        }, function () {
+            UserData.tracked(background_net, null, updateMenuBadge);
+        });
     }
 
     function startPlugin() {
