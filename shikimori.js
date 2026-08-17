@@ -1605,7 +1605,7 @@
             this.activity.loader(true);
 
             var lines = {};
-            var join = makeJoin(5, function () {
+            var join = makeJoin(4, function () {
                 self.buildLines(lines);
             });
 
@@ -1626,26 +1626,18 @@
                 });
             }
 
-            // 2. Календарь (списки + закладки)
-            UserData.upcoming(net, function (upcoming) {
-                var mine = [];
-                for (var i = 0; i < upcoming.length; i++) {
-                    if (upcoming[i].my) mine.push(upcoming[i]);
-                }
-                lines.upcoming = mine;
-                join();
-            }, function () {
-                join();
-            });
+            // Календарь на главной не собираем: он про дату эфира в Японии, а
+            // на главной важно то, что уже можно смотреть. Экран календаря
+            // остался — он открывается кнопкой и грузится только по запросу
 
-            // 3. «Сейчас смотрят в Lampa» (CUB), фолбэк TMDB
+            // 2. «Сейчас смотрят в Lampa» (CUB), фолбэк TMDB
             this.loadPopular(function (cards, from_cub) {
                 lines.popular = cards;
                 lines.popular_cub = from_cub;
                 join();
             });
 
-            // 4. Ленты Shikimori одним запросом
+            // 3. Ленты Shikimori одним запросом
             Shiki.multiCatalog(net, [
                 { alias: 'ongoing', params: { status: 'ongoing', order: 'popularity', limit: 20 } },
                 { alias: 'season', params: { season: currentSeason(0), order: 'ranked', limit: 20 } },
@@ -1751,23 +1743,6 @@
                     noimage: true,
                     onMore: nick ? function () { openCatalog({ mode: 'mylist' }); } : null,
                     nomore: !nick,
-                    cardClass: function (elem) { return new ShikiCard(elem); }
-                });
-            }
-
-            // Скоро выйдут
-            if (lines.upcoming && lines.upcoming.length) {
-                var upcoming_cards = [];
-                for (i = 0; i < lines.upcoming.length; i++) {
-                    upcoming_cards.push(upcomingToCard(lines.upcoming[i]));
-                }
-                data.push({
-                    title: Lampa.Lang.translate('shikimori_title_upcoming'),
-                    results: upcoming_cards,
-                    shiki: true,
-                    line_type: 'shiki',
-                    noimage: true,
-                    onMore: function () { openCatalog({ mode: 'calendar' }); },
                     cardClass: function (elem) { return new ShikiCard(elem); }
                 });
             }
