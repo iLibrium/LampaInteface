@@ -41,6 +41,7 @@
     var REVERSE_PARALLEL = 4;                 // и сколько из них одновременно
     var FAVORITES_WAIT = 2500;                // ждём синхронизацию закладок аккаунта, мс
     var BADGE_DELAY = 6000;                   // пересчёт счётчика в меню — после загрузки приложения
+    var SEQUELS_MAX = 40;                     // сколько досмотренных тайтлов проверяем на продолжения
 
     var manifest = {
         type: 'video',
@@ -333,6 +334,33 @@
                     for (var i = 0; i < list.length; i++) result.push(list[i]);
                     nextChunk();
                 }, err);
+            }
+
+            if (!ids.length) return ok([]);
+            nextChunk();
+        },
+
+        // Связанные тайтлы: нужны продолжения того, что уже досмотрено.
+        // Батчами по 10 — с вложенным related запрос тяжёлый по лимиту сложности
+        relatedByIds: function (net, ids, ok, err) {
+            var self = this;
+            var result = [];
+            var offset = 0;
+
+            function nextChunk() {
+                if (offset >= ids.length) return ok(result);
+                var part = ids.slice(offset, offset + 10);
+                offset += 10;
+                var q = '{ animes(ids: ' + JSON.stringify(part.join(',')) + ', limit: 10) { id related { relationRu anime { ' +
+                    'id malId name russian kind status episodes airedOn { year } poster { mainUrl } } } } }';
+                self.graphql(net, q, function (data) {
+                    var list = data.animes || [];
+                    for (var i = 0; i < list.length; i++) result.push(list[i]);
+                    nextChunk();
+                }, function () {
+                    // Часть пришла — работаем с тем, что есть
+                    ok(result);
+                });
             }
 
             if (!ids.length) return ok([]);
@@ -1514,6 +1542,47 @@
             }
         },
 
+        // Продолжения того, что вы уже досмотрели. Законченный тайтл выпадает
+        // из поля зрения вместе с сиквелом — списки эту дыру не закрывают
+        sequels: function (net, rates, ok) {
+            var mals = (rates && rates.mals) || {};
+            var done = [];
+
+            for (var mal in mals) {
+                if (mals[mal] && mals[mal].status == 'completed') done.push(parseInt(mal, 10));
+            }
+            if (!done.length) return ok([]);
+            done = done.slice(0, SEQUELS_MAX);
+
+            Shiki.relatedByIds(net, done, function (list) {
+                var picked = [];
+                var seen = {};
+
+                for (var i = 0; i < list.length; i++) {
+                    var related = list[i].related || [];
+                    for (var j = 0; j < related.length; j++) {
+                        var rel = related[j];
+                        if (!rel || !rel.anime) continue;
+                        if (String(rel.relationRu).indexOf('Продолжение') < 0) continue;
+
+                        var anime = rel.anime;
+                        var sid = parseInt(anime.malId || anime.id, 10);
+                        // Уже в списках — значит про него знают; анонсы пропускаем,
+                        // здесь только то, что реально можно смотреть
+                        if (!sid || mals[sid] || seen['s' + sid]) continue;
+                        if (anime.status != 'released' && anime.status != 'ongoing') continue;
+
+                        seen['s' + sid] = true;
+                        picked.push(anime);
+                    }
+                }
+
+                ok(picked.slice(0, 20));
+            }, function () {
+                ok([]);
+            });
+        },
+
         // Что вообще вышло с озвучкой за последние сутки — не только из закладок.
         // Лента Kodik уже в кэше после tracked(), второго запроса не будет
         released: function (net, ok) {
@@ -1872,7 +1941,7 @@
             this.activity.loader(true);
 
             var lines = {};
-            var join = makeJoin(5, function () {
+            var join = makeJoin(6, function () {
                 self.buildLines(lines);
             });
 
@@ -1881,9 +1950,14 @@
             UserData.rates(net, function (rates) {
                 join();
                 track(rates);
+                UserData.sequels(net, rates, function (cards) {
+                    lines.sequels = cards;
+                    join();
+                });
             }, function () {
                 join();
                 track(null);
+                join();
             });
 
             function track(rates) {
@@ -2017,6 +2091,19 @@
                     noimage: true,
                     onMore: nick ? function () { openCatalog({ mode: 'mylist' }); } : null,
                     nomore: !nick,
+                    cardClass: function (elem) { return new ShikiCard(elem); }
+                });
+            }
+
+            // Есть продолжение — сиквелы того, что вы досмотрели
+            if (lines.sequels && lines.sequels.length) {
+                data.push({
+                    title: Lampa.Lang.translate('shikimori_title_sequels'),
+                    results: lines.sequels,
+                    shiki: true,
+                    line_type: 'shiki',
+                    noimage: true,
+                    nomore: true,
                     cardClass: function (elem) { return new ShikiCard(elem); }
                 });
             }
@@ -3061,6 +3148,7 @@
             shikimori_title_watching: { ru: 'Я смотрю', en: 'Watching', uk: 'Я дивлюсь' },
             shikimori_title_later: { ru: 'Позже', en: 'Later', uk: 'Пізніше' },
             shikimori_title_released: { ru: 'Свежая озвучка', en: 'Just dubbed', uk: 'Свіже озвучення' },
+            shikimori_title_sequels: { ru: 'Есть продолжение', en: 'Sequels are out', uk: 'Є продовження' },
 
             shikimori_menu_hide: { ru: 'Не интересует', en: 'Not interested', uk: 'Не цікавить' },
             shikimori_menu_unhide: { ru: 'Вернуть в «Новые серии»', en: 'Show in New episodes again', uk: 'Повернути в «Нові серії»' },
