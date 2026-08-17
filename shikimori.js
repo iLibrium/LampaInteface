@@ -35,7 +35,7 @@
     ];
     var KODIK_TTL = 30 * 60 * 1000;           // кэш ленты Kodik: 30 минут
     var KODIK_PAGES = 2;                      // 2 страницы по 100 строк ~ сутки релизов
-    var KODIK_LOOKUP_MAX = 8;                 // точечных запросов за обновление — не больше
+    var KODIK_LOOKUP_MAX = 12;                // точечных запросов за обновление — не больше
     var KODIK_FRESH_DAYS = 14;                // «новой» серия считается столько дней
     var REVERSE_MAX = 40;                     // обратных запросов TMDB->MAL за обновление
     var REVERSE_PARALLEL = 4;                 // и сколько из них одновременно
@@ -999,6 +999,47 @@
         });
     }
 
+    // Скрытые тайтлы: карточки в строках больше нет, значит и долгим нажатием
+    // её не вернуть — список нужен отдельным экраном в настройках
+    function pickHidden() {
+        var map = Hidden.all();
+        var sids = [];
+        for (var key in map) {
+            var sid = parseInt(String(key).replace('s', ''), 10);
+            if (sid) sids.push(sid);
+        }
+
+        if (!sids.length) return Lampa.Noty.show(Lampa.Lang.translate('shikimori_hidden_empty'));
+
+        var enabled = Lampa.Controller.enabled().name;
+
+        Shiki.animesByIds(background_net, sids.slice(0, 100), function (animes) {
+            var items = [];
+            for (var i = 0; i < animes.length; i++) {
+                items.push({
+                    title: animes[i].russian || animes[i].name,
+                    sid: parseInt(animes[i].malId || animes[i].id, 10)
+                });
+            }
+            if (!items.length) return Lampa.Noty.show(Lampa.Lang.translate('shikimori_hidden_empty'));
+
+            Lampa.Select.show({
+                title: Lampa.Lang.translate('shikimori_settings_hidden'),
+                items: items,
+                onSelect: function (item) {
+                    Lampa.Controller.toggle(enabled);
+                    Hidden.toggle(item.sid);
+                    Lampa.Noty.show(Lampa.Lang.translate('shikimori_noty_unhidden'));
+                },
+                onBack: function () {
+                    Lampa.Controller.toggle(enabled);
+                }
+            });
+        }, function () {
+            Lampa.Noty.show(Lampa.Lang.translate('shikimori_error_api'));
+        });
+    }
+
     // Выбор студий озвучки. Список собираем из тех, что встречаются в ваших
     // тайтлах: полный словарь Kodik — тысячи строк, с пульта это нелистаемо
     function pickStudios() {
@@ -1709,43 +1750,79 @@
             var mals = (rates && rates.mals) || {};
             var watching = (rates && rates.watching) || [];
 
+            var rev_map = {};
+
+            // Сопоставление закладок идёт первым: без id Shikimori мы не можем
+            // спросить Kodik про избранное, а раньше и не спрашивали — про
+            // онгоинг из «Позже» узнавали, только если он попадал в суточную ленту
             this.favorites(function (list) {
                 favorites = list;
 
-                if (!Kodik.enabled()) return reverse({});
+                if (!favorites.length) return feed({});
+
+                var ids = [];
+                for (var i = 0; i < favorites.length; i++) ids.push(favorites[i].id);
+                Match.reverse(net, ids, feed);
+            });
+
+            function feed(rev) {
+                rev_map = rev || {};
+
+                if (!Kodik.enabled()) return finish({}, rev_map);
 
                 Kodik.feed(net, function (rows) {
                     lookup(Kodik.mergeRows(rows));
                 }, function () {
                     lookup({});
                 });
-            });
+            }
 
-            // Точечно добираем онгоинги из «Я смотрю», которых не было в суточной ленте
+            // Точечно добираем то, чего не было в суточной ленте: и списки
+            // Shikimori, и закладки. У закладок статус неизвестен, поэтому
+            // сперва узнаём его одним запросом и спрашиваем только про онгоинги
             function lookup(fresh) {
                 var store = Kodik.store();
                 var unknown = [];
-                for (var i = 0; i < watching.length; i++) {
-                    var sid = parseInt(watching[i].malId || watching[i].id, 10);
-                    if (!sid || watching[i].status != 'ongoing') continue;
-                    if (!fresh['s' + sid] && !store['s' + sid]) unknown.push(sid);
-                }
-                if (!unknown.length) return reverse(Kodik.remember(fresh));
-                Kodik.lookup(net, unknown, function (found) {
-                    for (var key in found) fresh[key] = found[key];
-                    reverse(Kodik.remember(fresh));
-                });
-            }
+                var candidates = [];
+                var i, sid;
 
-            // Закладки -> id Shikimori: в TMDB один сериал на все сезоны,
-            // а в Shikimori каждый сезон — отдельный тайтл
-            function reverse(known) {
-                if (!favorites.length) return finish(known, {});
-                var ids = [];
-                for (var i = 0; i < favorites.length; i++) ids.push(favorites[i].id);
-                Match.reverse(net, ids, function (map) {
-                    finish(known, map);
+                function isNew(id) {
+                    return id && !fresh['s' + id] && !store['s' + id];
+                }
+
+                for (i = 0; i < watching.length; i++) {
+                    sid = parseInt(watching[i].malId || watching[i].id, 10);
+                    if (watching[i].status == 'ongoing' && isNew(sid)) unknown.push(sid);
+                }
+
+                for (var key in rev_map) {
+                    var seasons = rev_map[key] || [];
+                    for (i = 0; i < seasons.length; i++) {
+                        sid = seasons[i].mal;
+                        if (isNew(sid) && candidates.indexOf(sid) < 0) candidates.push(sid);
+                    }
+                }
+
+                if (!candidates.length) return ask(unknown);
+
+                Shiki.animesByIds(net, candidates.slice(0, 100), function (animes) {
+                    for (var j = 0; j < animes.length; j++) {
+                        if (animes[j].status != 'ongoing') continue;
+                        var id = parseInt(animes[j].malId || animes[j].id, 10);
+                        if (id && unknown.indexOf(id) < 0) unknown.push(id);
+                    }
+                    ask(unknown);
+                }, function () {
+                    ask(unknown);
                 });
+
+                function ask(ids) {
+                    if (!ids.length) return finish(Kodik.remember(fresh), rev_map);
+                    Kodik.lookup(net, ids, function (found) {
+                        for (var k in found) fresh[k] = found[k];
+                        finish(Kodik.remember(fresh), rev_map);
+                    });
+                }
             }
 
             function finish(known, rev) {
@@ -2363,9 +2440,10 @@
                 });
             }
 
-            // Я смотрю — ровно категория «Смотрю» из избранного Lampa (`look`).
-            // Сверху то, где есть новые серии, дальше — по свежести
-            var watching = favoriteRow(tracked, 'look');
+            // Я смотрю: сперва помеченные тегом «Смотрю», следом — вычисленные
+            // по факту (есть прогресс и есть что смотреть дальше). Так видно,
+            // что тег пропускает, и при этом ничего помеченного не теряется
+            var watching = favoriteRow(tracked, 'look').concat(watchingNow(tracked));
 
             if (watching.length) {
                 var watching_cards = [];
@@ -2500,13 +2578,34 @@
         return comp;
     }
 
+    // Скрытое «Не интересует» не показываем ни в одной личной строке
+    function visible(item) {
+        return !(item.kodik && Hidden.has(item.kodik.sid));
+    }
+
+    // Что реально смотрится: есть прогресс и есть непросмотренное. Тег этого
+    // не знает — его ставят один раз и не снимают, поэтому досмотренное
+    // висит в «Смотрю» месяцами
+    function watchingNow(tracked) {
+        var picked = [];
+        for (var i = 0; i < tracked.length; i++) {
+            var item = tracked[i];
+            if (item.groups && item.groups.look) continue;  // помеченные идут отдельно, выше
+            if (!visible(item)) continue;
+            if (!item.watched || item.total <= item.watched) continue;
+            picked.push(item);
+        }
+        picked.sort(function (a, b) { return b.watched_at - a.watched_at; });
+        return picked;
+    }
+
     // Одна категория избранного Lampa -> строка. Порядок как в «Продолжить
     // просмотр»: что включали последним — то и сверху. Дальше начатое, потом
     // то, где есть новые серии, и в конце нетронутое
     function favoriteRow(tracked, group) {
         var picked = [];
         for (var i = 0; i < tracked.length; i++) {
-            if (tracked[i].groups && tracked[i].groups[group]) picked.push(tracked[i]);
+            if (tracked[i].groups && tracked[i].groups[group] && visible(tracked[i])) picked.push(tracked[i]);
         }
         picked.sort(function (a, b) {
             if (a.watched_at != b.watched_at) return b.watched_at - a.watched_at;
@@ -3380,6 +3479,21 @@
         Lampa.SettingsApi.addParam({
             component: 'shikimori',
             param: {
+                name: 'shikimori_hidden_pick',
+                type: 'button'
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_hidden'),
+                description: Lampa.Lang.translate('shikimori_settings_hidden_descr')
+            },
+            onChange: function () {
+                pickHidden();
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
                 name: 'shikimori_studios_pick',
                 type: 'button'
             },
@@ -3494,11 +3608,14 @@
             shikimori_title_sequels: { ru: 'Есть продолжение', en: 'Sequels are out', uk: 'Є продовження' },
 
             shikimori_menu_hide: { ru: 'Не интересует', en: 'Not interested', uk: 'Не цікавить' },
-            shikimori_menu_unhide: { ru: 'Вернуть в «Новые серии»', en: 'Show in New episodes again', uk: 'Повернути в «Нові серії»' },
+            shikimori_menu_unhide: { ru: 'Показывать снова', en: 'Show again', uk: 'Показувати знову' },
+            shikimori_settings_hidden: { ru: 'Скрытые тайтлы', en: 'Hidden titles', uk: 'Приховані тайтли' },
+            shikimori_settings_hidden_descr: { ru: 'Что вы убрали через «Не интересует». Выберите тайтл, чтобы вернуть его в строки', en: 'What you dismissed; pick a title to bring it back', uk: 'Що ви прибрали; оберіть тайтл, щоб повернути' },
+            shikimori_hidden_empty: { ru: 'Ничего не скрыто', en: 'Nothing hidden', uk: 'Нічого не приховано' },
             shikimori_menu_seen: { ru: 'Отметить просмотренным до серии', en: 'Mark watched up to episode', uk: 'Позначити переглянутим до серії' },
             shikimori_menu_open: { ru: 'Открыть карточку', en: 'Open card', uk: 'Відкрити картку' },
-            shikimori_noty_hidden: { ru: 'Больше не покажем в «Новых сериях»', en: 'Hidden from New episodes', uk: 'Більше не покажемо' },
-            shikimori_noty_unhidden: { ru: 'Вернули в «Новые серии»', en: 'Back in New episodes', uk: 'Повернули' },
+            shikimori_noty_hidden: { ru: 'Убрали. Вернуть можно в настройках', en: 'Dismissed. Restore it in settings', uk: 'Прибрали. Повернути можна в налаштуваннях' },
+            shikimori_noty_unhidden: { ru: 'Вернули в строки', en: 'Back in the rows', uk: 'Повернули' },
             shikimori_noty_seen: { ru: 'Отмечено просмотренным', en: 'Marked as watched', uk: 'Позначено переглянутим' },
             shikimori_title_fresh: { ru: 'Новые серии', en: 'New episodes', uk: 'Нові серії' },
             shikimori_title_upcoming: { ru: 'Скоро выйдут', en: 'Airing soon', uk: 'Скоро вийдуть' },
