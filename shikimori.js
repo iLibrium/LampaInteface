@@ -460,6 +460,43 @@
             return storBool('shikimori_kodik_subs', false);
         },
 
+        // Предпочитаемые студии. Пусто — засчитываем любую озвучку
+        studios: function () {
+            var list = storGet('shikimori_studios', []);
+            return Object.prototype.toString.call(list) == '[object Array]' ? list : [];
+        },
+
+        studioAllowed: function (title) {
+            var list = this.studios();
+            if (!list.length) return true;
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] == title) return true;
+            }
+            return false;
+        },
+
+        // Студии, которые реально встречаются в ваших данных — из них и выбираем.
+        // Полный словарь Kodik это тысячи строк, листать их с пульта невозможно
+        knownStudios: function () {
+            var seen = {};
+            var rows = this.feed_cache || [];
+            for (var i = 0; i < rows.length; i++) {
+                var name = rows[i].translation && rows[i].translation.title;
+                if (name) seen[name] = true;
+            }
+            var store = this.store();
+            for (var key in store) {
+                if (store[key] && store[key].studio) seen[store[key].studio] = true;
+            }
+            var chosen = this.studios();
+            for (i = 0; i < chosen.length; i++) seen[chosen[i]] = true;
+
+            var list = [];
+            for (var name2 in seen) list.push(name2);
+            list.sort();
+            return list;
+        },
+
         request: function (net, path, params, ok, err) {
             var self = this;
             var tokens = this.tokens();
@@ -550,6 +587,9 @@
                 var ep = parseInt(row.last_episode, 10) || 0;
                 if (!sid || !ep) continue;
 
+                var studio = (row.translation && row.translation.title) || '';
+                if (!this.studioAllowed(studio)) continue;
+
                 var voice = !row.translation || row.translation.type != 'subtitles';
                 var key = 's' + sid;
                 var prev = map[key];
@@ -559,7 +599,7 @@
                     sid: sid,
                     ep: ep,
                     voice: voice,
-                    studio: (row.translation && row.translation.title) || '',
+                    studio: studio,
                     at: parseISO(row.updated_at),
                     aired: (row.material_data && parseInt(row.material_data.episodes_aired, 10)) || 0
                 };
@@ -637,6 +677,66 @@
             return !!map['s' + sid];
         }
     };
+
+    // Выбор студий озвучки. Список собираем из тех, что встречаются в ваших
+    // тайтлах: полный словарь Kodik — тысячи строк, с пульта это нелистаемо
+    function pickStudios() {
+        var enabled = Lampa.Controller.enabled().name;
+
+        function show(names) {
+            var chosen = Kodik.studios();
+            var items = [{
+                title: Lampa.Lang.translate('shikimori_studios_any'),
+                value: '',
+                selected: !chosen.length
+            }];
+
+            for (var i = 0; i < names.length; i++) {
+                items.push({
+                    title: names[i],
+                    value: names[i],
+                    selected: chosen.indexOf(names[i]) >= 0
+                });
+            }
+
+            Lampa.Select.show({
+                title: Lampa.Lang.translate('shikimori_settings_studios'),
+                items: items,
+                onCheck: function (item) {
+                    if (!item.value) {
+                        storSet('shikimori_studios', []);
+                        item.selected = true;
+                    }
+                    else {
+                        var list = Kodik.studios();
+                        var at = list.indexOf(item.value);
+                        if (at >= 0) list.splice(at, 1);
+                        else list.push(item.value);
+                        storSet('shikimori_studios', list);
+                        item.selected = at < 0;
+                    }
+                    // Накопленные серии собраны по прежнему правилу — сбрасываем,
+                    // иначе останутся числа от студий, которые больше не в счёт
+                    storSet('shikimori_kodik_eps', {});
+                    Kodik.dropCache();
+                },
+                onBack: function () {
+                    Lampa.Controller.toggle(enabled);
+                }
+            });
+        }
+
+        var known = Kodik.knownStudios();
+        if (known.length) return show(known);
+
+        // Ещё ничего не знаем — подтянем ленту, чтобы было из чего выбирать
+        Lampa.Noty.show(Lampa.Lang.translate('shikimori_studios_loading'));
+        Kodik.feed(background_net, function () {
+            show(Kodik.knownStudios());
+        }, function () {
+            show([]);
+        });
+    }
 
     // Меню по долгому нажатию на карточке — вместо лишних кнопок на экране
     function cardMenu(data) {
@@ -2773,6 +2873,21 @@
         Lampa.SettingsApi.addParam({
             component: 'shikimori',
             param: {
+                name: 'shikimori_studios_pick',
+                type: 'button'
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_studios'),
+                description: Lampa.Lang.translate('shikimori_settings_studios_descr')
+            },
+            onChange: function () {
+                pickStudios();
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
                 name: 'shikimori_kodik_host',
                 type: 'input',
                 values: '',
@@ -2935,6 +3050,10 @@
             shikimori_settings_kodik_descr: { ru: 'Серии, которые уже вышли с озвучкой (данные Kodik). Выключено — останутся только даты эфира в Японии', en: 'Episodes already released with a dub (Kodik). Off — Japanese air dates only', uk: 'Серії, що вже вийшли з озвучкою (Kodik)' },
             shikimori_settings_kodik_subs: { ru: 'Засчитывать субтитры', en: 'Count subtitles', uk: 'Зараховувати субтитри' },
             shikimori_settings_kodik_subs_descr: { ru: 'Показывать серию новой, если вышла только с субтитрами, без озвучки', en: 'Treat subtitle-only releases as new episodes', uk: 'Показувати серію новою, якщо вийшла лише із субтитрами' },
+            shikimori_settings_studios: { ru: 'Студии озвучки', en: 'Dub studios', uk: 'Студії озвучення' },
+            shikimori_settings_studios_descr: { ru: 'Считать серию вышедшей только когда её озвучили выбранные студии. Не выбрано — засчитывается любая озвучка', en: 'Count an episode as out only when your studios dubbed it', uk: 'Зараховувати серію лише від обраних студій' },
+            shikimori_studios_any: { ru: 'Любая озвучка', en: 'Any studio', uk: 'Будь-яка озвучка' },
+            shikimori_studios_loading: { ru: 'Собираем список студий…', en: 'Collecting studios…', uk: 'Збираємо список студій…' },
             shikimori_settings_kodik_host: { ru: 'Адрес Kodik API', en: 'Kodik API host', uk: 'Адреса Kodik API' },
             shikimori_settings_kodik_host_descr: { ru: 'По умолчанию kodik-api.com. Менять, если домен снова переедет', en: 'Defaults to kodik-api.com. Change if the domain moves again', uk: 'За замовчуванням kodik-api.com' },
             shikimori_settings_kodik_token: { ru: 'Токен Kodik', en: 'Kodik token', uk: 'Токен Kodik' },
