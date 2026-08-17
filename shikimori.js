@@ -1261,7 +1261,7 @@
                     items.push({
                         card: card,
                         tmdb: { id: card.id, method: card.name || card.original_name ? 'tv' : 'movie' },
-                        wath: !!(card._fav_groups && card._fav_groups.wath),
+                        groups: card._fav_groups || {},
                         kodik: best ? best.info : null,
                         total: total,
                         watched: watched,
@@ -1281,10 +1281,12 @@
                     var seen = rate ? (rate.episodes || 0) : 0;
                     var have = info ? info.ep : (anime.episodesAired || 0);
 
+                    // Списки Shikimori кормят «Новые серии», но в строки закладок
+                    // не попадают: там строго то, что лежит в избранном Lampa
                     items.push({
                         card: anime,
                         tmdb: null,
-                        wath: true,
+                        groups: {},
                         kodik: info || null,
                         total: have,
                         watched: seen,
@@ -1732,17 +1734,9 @@
                 });
             }
 
-            // Я смотрю — «Смотрю» из закладок Lampa плюс списки Shikimori.
-            // Сверху то, где есть новые серии, дальше — по прогрессу
-            var watching = [];
-            for (i = 0; i < tracked.length; i++) {
-                if (tracked[i].wath) watching.push(tracked[i]);
-            }
-            watching.sort(function (a, b) {
-                if ((b.fresh > 0 ? 1 : 0) != (a.fresh > 0 ? 1 : 0)) return (b.fresh > 0 ? 1 : 0) - (a.fresh > 0 ? 1 : 0);
-                if (b.at != a.at) return b.at - a.at;
-                return (b.watched > 0 ? 1 : 0) - (a.watched > 0 ? 1 : 0);
-            });
+            // Я смотрю — ровно категория «Смотрю» из избранного Lampa (`look`).
+            // Сверху то, где есть новые серии, дальше — по свежести
+            var watching = favoriteRow(tracked, 'look');
 
             if (watching.length) {
                 var watching_cards = [];
@@ -1815,6 +1809,23 @@
                 })(shiki_lines[i]);
             }
 
+            // Позже — категория «Позже» из избранного Lampa (`wath`).
+            // Внизу экрана: это отложенное, а не то, что смотрят сейчас
+            var later = favoriteRow(tracked, 'wath');
+
+            if (later.length) {
+                var later_cards = [];
+                for (i = 0; i < later.length; i++) later_cards.push(UserData.decorate(later[i]));
+                data.push({
+                    title: Lampa.Lang.translate('shikimori_title_later'),
+                    results: later_cards,
+                    shiki: true,
+                    noimage: true,
+                    nomore: true,
+                    cardClass: function (elem) { return new ShikiCard(elem); }
+                });
+            }
+
             this.build(data);
         };
 
@@ -1843,6 +1854,21 @@
         };
 
         return comp;
+    }
+
+    // Одна категория избранного Lampa -> строка. Сверху то, где есть новые
+    // серии, дальше по свежести, начатое выше нетронутого
+    function favoriteRow(tracked, group) {
+        var picked = [];
+        for (var i = 0; i < tracked.length; i++) {
+            if (tracked[i].groups && tracked[i].groups[group]) picked.push(tracked[i]);
+        }
+        picked.sort(function (a, b) {
+            if ((b.fresh > 0 ? 1 : 0) != (a.fresh > 0 ? 1 : 0)) return (b.fresh > 0 ? 1 : 0) - (a.fresh > 0 ? 1 : 0);
+            if (b.at != a.at) return b.at - a.at;
+            return (b.watched > 0 ? 1 : 0) - (a.watched > 0 ? 1 : 0);
+        });
+        return picked;
     }
 
     // Календарная запись -> данные для ShikiCard
@@ -2699,6 +2725,7 @@
 
             shikimori_title_menu: { ru: 'Меню', en: 'Menu', uk: 'Меню' },
             shikimori_title_watching: { ru: 'Я смотрю', en: 'Watching', uk: 'Я дивлюсь' },
+            shikimori_title_later: { ru: 'Позже', en: 'Later', uk: 'Пізніше' },
             shikimori_title_fresh: { ru: 'Новые серии', en: 'New episodes', uk: 'Нові серії' },
             shikimori_title_upcoming: { ru: 'Скоро выйдут', en: 'Airing soon', uk: 'Скоро вийдуть' },
             shikimori_title_popular_cub: { ru: 'Сейчас смотрят в Lampa', en: 'Now watching in Lampa', uk: 'Зараз дивляться в Lampa' },
