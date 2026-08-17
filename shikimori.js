@@ -112,6 +112,7 @@
 
     var MONTHS_RU_FULL = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
     var WEEKDAYS_RU = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+    var WEEKDAYS_SHORT = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
 
     // Склонение: 1 серия, 2 серии, 5 серий
     function plural(n, forms) {
@@ -2324,6 +2325,8 @@
                     index[key].cards.push(upcomingToCard(entry));
                 }
 
+                if (first) self.appendWeek(upcoming);
+
                 var total = 0;
                 for (i = 0; i < groups.length; i++) {
                     self.appendDay(groups[i].title);
@@ -2337,6 +2340,50 @@
         };
 
         // Заголовок дня внутри сетки
+        // Неделя одной полосой: сколько серий в каждый из ближайших семи дней.
+        // Отвечает на «что сегодня» без прокрутки. Намеренно не фокусируется —
+        // это сводка, а не элемент управления, и она не должна ломать пульт
+        this.appendWeek = function (entries) {
+            var counts = {};
+            for (var i = 0; i < entries.length; i++) {
+                var key = dayKey(entries[i].at);
+                counts[key] = (counts[key] || 0) + 1;
+            }
+
+            var week = document.createElement('div');
+            week.className = 'shikimori-week';
+            var today = new Date();
+
+            for (i = 0; i < 7; i++) {
+                var day = new Date(today.getTime() + i * 86400000);
+                var count = counts[dayKey(day.getTime())] || 0;
+
+                var cell = document.createElement('div');
+                cell.className = 'shikimori-week__day' +
+                    (i === 0 ? ' shikimori-week__day--today' : '') +
+                    (count ? '' : ' shikimori-week__day--empty');
+
+                var name = document.createElement('div');
+                name.className = 'shikimori-week__name';
+                name.innerText = WEEKDAYS_SHORT[day.getDay()];
+
+                var date = document.createElement('div');
+                date.className = 'shikimori-week__date';
+                date.innerText = day.getDate();
+
+                var num = document.createElement('div');
+                num.className = 'shikimori-week__count';
+                num.innerText = count ? count : '—';
+
+                cell.appendChild(name);
+                cell.appendChild(date);
+                cell.appendChild(num);
+                week.appendChild(cell);
+            }
+
+            body.appendChild(week);
+        };
+
         this.appendDay = function (title) {
             var head_el = document.createElement('div');
             head_el.className = 'shikimori-day';
@@ -2858,6 +2905,16 @@
             '<style>' +
             // сетка каталога
             '.shikimori-catalog{-webkit-box-pack:justify!important;-webkit-justify-content:space-between!important;-ms-flex-pack:justify!important;justify-content:space-between!important}' +
+            // неделя в шапке календаря
+            '.shikimori-week{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;margin:0 0 1.2em 0}' +
+            '.shikimori-week__day{-webkit-box-flex:1;-webkit-flex:1 1 0;-ms-flex:1 1 0;flex:1 1 0;text-align:center;padding:0.7em 0.2em;margin-right:0.5em;border-radius:0.5em;background:rgba(255,255,255,0.08)}' +
+            '.shikimori-week__day:last-child{margin-right:0}' +
+            '.shikimori-week__day--today{background:rgba(255,255,255,0.18)}' +
+            '.shikimori-week__day--empty{opacity:0.4}' +
+            '.shikimori-week__name{font-size:0.9em;opacity:0.7;text-transform:uppercase}' +
+            '.shikimori-week__date{font-size:1.3em;line-height:1.3}' +
+            '.shikimori-week__count{font-size:1.1em;font-weight:700;color:#57F570}' +
+            '.shikimori-week__day--empty .shikimori-week__count{color:inherit;font-weight:400}' +
             // заголовок дня в календаре — разрывает flex-строку
             '.shikimori-day{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;font-size:1.4em;margin:0.6em 0 0.8em 0;opacity:0.75}' +
             // строка кнопок вместо ряда «Меню»
