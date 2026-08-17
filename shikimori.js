@@ -1502,6 +1502,46 @@
             }
         },
 
+        // Что вообще вышло с озвучкой за последние сутки — не только из закладок.
+        // Лента Kodik уже в кэше после tracked(), второго запроса не будет
+        released: function (net, ok) {
+            if (!Kodik.enabled()) return ok([]);
+
+            Kodik.feed(net, function (rows) {
+                var merged = Kodik.mergeRows(rows);
+                var list = [];
+                for (var key in merged) {
+                    if (!Hidden.has(merged[key].sid)) list.push(merged[key]);
+                }
+                if (!list.length) return ok([]);
+
+                list.sort(function (a, b) { return b.at - a.at; });
+                list = list.slice(0, 20);
+
+                var ids = [];
+                for (var i = 0; i < list.length; i++) ids.push(list[i].sid);
+
+                Shiki.animesByIds(net, ids, function (animes) {
+                    var by_id = {};
+                    for (var j = 0; j < animes.length; j++) {
+                        by_id['s' + parseInt(animes[j].malId || animes[j].id, 10)] = animes[j];
+                    }
+                    var cards = [];
+                    for (j = 0; j < list.length; j++) {
+                        var anime = by_id['s' + list[j].sid];
+                        if (!anime) continue;
+                        anime._kodik = list[j];
+                        cards.push(anime);
+                    }
+                    ok(cards);
+                }, function () {
+                    ok([]);
+                });
+            }, function () {
+                ok([]);
+            });
+        },
+
         // Карточка для отрисовки: прогресс и данные Kodik переносим на объект карточки.
         // Каждой строке — своя копия: Lampa помечает отрисованный объект `ready`
         // и во второй строке молча его пропускает (interaction/items/old/line.js)
@@ -1813,7 +1853,7 @@
             this.activity.loader(true);
 
             var lines = {};
-            var join = makeJoin(4, function () {
+            var join = makeJoin(5, function () {
                 self.buildLines(lines);
             });
 
@@ -1831,6 +1871,11 @@
                 UserData.tracked(net, rates, function (items) {
                     lines.tracked = items;
                     join();
+                    // Лента Kodik уже прогрета — общая строка идёт следом без запроса
+                    UserData.released(net, function (cards) {
+                        lines.released = cards;
+                        join();
+                    });
                 });
             }
 
@@ -1953,6 +1998,19 @@
                     noimage: true,
                     onMore: nick ? function () { openCatalog({ mode: 'mylist' }); } : null,
                     nomore: !nick,
+                    cardClass: function (elem) { return new ShikiCard(elem); }
+                });
+            }
+
+            // Свежая озвучка — всё, что вышло за сутки, независимо от закладок
+            if (lines.released && lines.released.length) {
+                data.push({
+                    title: Lampa.Lang.translate('shikimori_title_released'),
+                    results: lines.released,
+                    shiki: true,
+                    line_type: 'shiki',
+                    noimage: true,
+                    nomore: true,
                     cardClass: function (elem) { return new ShikiCard(elem); }
                 });
             }
@@ -2983,6 +3041,7 @@
             shikimori_title_menu: { ru: 'Меню', en: 'Menu', uk: 'Меню' },
             shikimori_title_watching: { ru: 'Я смотрю', en: 'Watching', uk: 'Я дивлюсь' },
             shikimori_title_later: { ru: 'Позже', en: 'Later', uk: 'Пізніше' },
+            shikimori_title_released: { ru: 'Свежая озвучка', en: 'Just dubbed', uk: 'Свіже озвучення' },
 
             shikimori_menu_hide: { ru: 'Не интересует', en: 'Not interested', uk: 'Не цікавить' },
             shikimori_menu_unhide: { ru: 'Вернуть в «Новые серии»', en: 'Show in New episodes again', uk: 'Повернути в «Нові серії»' },
