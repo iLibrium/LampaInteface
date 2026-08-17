@@ -610,9 +610,19 @@
         // Постоянное хранилище: что мы уже знали про каждый тайтл.
         // base — сколько серий было при первой встрече; для закладок без списка
         // Shikimori только по нему и можно понять, что серия именно новая.
+        // Читается на каждой карточке каталога, поэтому держим разобранным
+        store_memo: null,
+
         store: function () {
+            if (this.store_memo) return this.store_memo;
             var store = storGet('shikimori_kodik_eps', {});
-            return store && typeof store == 'object' ? store : {};
+            this.store_memo = store && typeof store == 'object' ? store : {};
+            return this.store_memo;
+        },
+
+        // Что известно про конкретный тайтл: null, если ещё не встречали
+        known: function (sid) {
+            return sid ? (this.store()['s' + sid] || null) : null;
         },
 
         remember: function (fresh) {
@@ -646,12 +656,14 @@
             }
 
             if (changed) storSet('shikimori_kodik_eps', store);
+            this.store_memo = store;
             return store;
         },
 
         dropCache: function () {
             this.feed_cache = null;
             this.feed_time = 0;
+            this.store_memo = null;
         }
     };
 
@@ -1761,6 +1773,13 @@
                 var subs = data._kodik.voice ? '' : ' · ' + Lampa.Lang.translate('shikimori_subtitles');
                 marker.querySelector('span').innerText = data._kodik.ep + ' ' +
                     Lampa.Lang.translate('shikimori_ep') + (subs || studio);
+            }
+            // В каталоге прогресса нет, но мы можем знать, что озвучка уже есть —
+            // листая список, сразу видно, что реально можно включить
+            else if (Kodik.known(parseInt(data.malId || data.id, 10))) {
+                var have = Kodik.known(parseInt(data.malId || data.id, 10));
+                marker.querySelector('span').innerText = have.ep + ' ' +
+                    Lampa.Lang.translate('shikimori_ep') + ' ' + Lampa.Lang.translate('shikimori_dubbed');
             }
             else if (data._next_at) {
                 marker.querySelector('span').innerText = formatDate(data._next_at) +
@@ -3105,6 +3124,7 @@
             shikimori_settings_uncensored: { ru: 'Показывать 18+', en: 'Show 18+', uk: 'Показувати 18+' },
             shikimori_settings_uncensored_descr: { ru: 'Отключает фильтр цензуры Shikimori', en: 'Disables Shikimori censorship filter', uk: 'Вимикає фільтр цензури Shikimori' },
             shikimori_subtitles: { ru: 'субтитры', en: 'subtitles', uk: 'субтитри' },
+            shikimori_dubbed: { ru: 'с озвучкой', en: 'dubbed', uk: 'з озвученням' },
             shikimori_settings_kodik: { ru: 'Строка «Новые серии»', en: 'New episodes row', uk: 'Рядок «Нові серії»' },
             shikimori_settings_kodik_descr: { ru: 'Серии, которые уже вышли с озвучкой (данные Kodik). Выключено — останутся только даты эфира в Японии', en: 'Episodes already released with a dub (Kodik). Off — Japanese air dates only', uk: 'Серії, що вже вийшли з озвучкою (Kodik)' },
             shikimori_settings_kodik_subs: { ru: 'Засчитывать субтитры', en: 'Count subtitles', uk: 'Зараховувати субтитри' },
