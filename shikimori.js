@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '1.2.0';
+    var VERSION = '1.3.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -1850,23 +1850,34 @@
                     var mark = Progress.lastWatched(card, total);
                     var watched = mark ? mark.episode : 0;
                     var fresh = 0;
+                    var airing = false;
 
                     if (best) {
                         // Точный счёт возможен, только когда нумерация сезона Lampa
                         // совпадает с нумерацией Shikimori. Иначе — от базы первой встречи
                         var aligned = !best.season || !mark || mark.season == best.season;
                         fresh = (watched && aligned) ? total - watched : total - (best.info.base || total);
+
+                        // Прогресса нет вовсе — сравнивать не с чем, и база первой
+                        // встречи молчит до следующей серии. Но если озвучка вышла
+                        // на днях, это ровно та новость, ради которой тайтл в избранном
+                        airing = !watched && best.info.at >= Date.now() - KODIK_FRESH_DAYS * 86400000;
                     }
+
+                    var sids = [];
+                    for (j = 0; j < seasons.length; j++) sids.push(seasons[j].mal);
 
                     items.push({
                         card: card,
                         tmdb: { id: card.id, method: card.name || card.original_name ? 'tv' : 'movie' },
                         groups: card._fav_groups || {},
+                        sids: sids,
                         kodik: best ? best.info : null,
                         total: total,
                         watched: watched,
                         watched_at: mark ? mark.at : 0,
                         fresh: fresh > 0 ? fresh : 0,
+                        airing: airing,
                         at: best ? best.info.at : 0
                     });
                 }
@@ -1902,13 +1913,28 @@
 
         // Продолжения того, что вы уже досмотрели. Законченный тайтл выпадает
         // из поля зрения вместе с сиквелом — списки эту дыру не закрывают
-        sequels: function (net, rates, ok) {
+        sequels: function (net, rates, tracked, ok) {
             var mals = (rates && rates.mals) || {};
             var done = [];
+            var seen = {};
+
+            function add(id) {
+                if (!id || seen['s' + id]) return;
+                seen['s' + id] = true;
+                done.push(id);
+            }
 
             for (var mal in mals) {
-                if (mals[mal] && mals[mal].status == 'completed') done.push(parseInt(mal, 10));
+                if (mals[mal] && mals[mal].status == 'completed') add(parseInt(mal, 10));
             }
+
+            // Без ника Shikimori источник один — закладки «Просмотрено» в Lampa
+            for (var i = 0; i < (tracked || []).length; i++) {
+                var item = tracked[i];
+                if (!item.groups || !item.groups.viewed) continue;
+                for (var j = 0; j < (item.sids || []).length; j++) add(item.sids[j]);
+            }
+
             if (!done.length) return ok([]);
             done = done.slice(0, SEQUELS_MAX);
 
@@ -2308,14 +2334,9 @@
             UserData.rates(net, function (rates) {
                 join();
                 track(rates);
-                UserData.sequels(net, rates, function (cards) {
-                    lines.sequels = cards;
-                    join();
-                });
             }, function () {
                 join();
                 track(null);
-                join();
             });
 
             function track(rates) {
@@ -2326,6 +2347,12 @@
                     // Прогресс, набранный в Lampa, уезжает в список Shikimori
                     Sync.push(net, items, rates, function (sent) {
                         if (sent) Lampa.Noty.show(Lampa.Lang.translate('shikimori_sync_done') + ': ' + sent);
+                    });
+
+                    // Продолжениям нужны id закладок — они появляются только здесь
+                    UserData.sequels(net, rates, items, function (cards) {
+                        lines.sequels = cards;
+                        join();
                     });
 
                     // Лента Kodik уже прогрета — общая строка идёт следом без запроса
@@ -3895,9 +3922,11 @@
         else badge.addClass('hide').text('');
     }
 
-    // Новое и не скрытое — этим живут и строка «Новые серии», и счётчик в меню
+    // Новое и не скрытое — этим живут и строка «Новые серии», и счётчик в меню.
+    // Либо мы знаем, сколько серий не просмотрено, либо просто знаем, что
+    // озвучка вышла на днях — для избранного без прогресса это единственный сигнал
     function isFresh(item) {
-        if (!(item.fresh > 0)) return false;
+        if (!(item.fresh > 0) && !item.airing) return false;
         if (item.at < Date.now() - KODIK_FRESH_DAYS * 86400000) return false;
         return !(item.kodik && Hidden.has(item.kodik.sid));
     }
