@@ -615,6 +615,96 @@
         }
     };
 
+    /* ============================================================
+     * Скрытые тайтлы: «Не интересует»
+     * ============================================================ */
+
+    var Hidden = {
+        all: function () {
+            var map = storGet('shikimori_hidden', {});
+            return map && typeof map == 'object' ? map : {};
+        },
+
+        has: function (sid) {
+            return !!this.all()['s' + sid];
+        },
+
+        toggle: function (sid) {
+            var map = this.all();
+            if (map['s' + sid]) delete map['s' + sid];
+            else map['s' + sid] = Date.now();
+            storSet('shikimori_hidden', map);
+            return !!map['s' + sid];
+        }
+    };
+
+    // Меню по долгому нажатию на карточке — вместо лишних кнопок на экране
+    function cardMenu(data) {
+        var sid = data._kodik && data._kodik.sid;
+        var items = [];
+
+        if (sid) {
+            items.push({
+                title: Lampa.Lang.translate(Hidden.has(sid) ? 'shikimori_menu_unhide' : 'shikimori_menu_hide'),
+                action: 'hide'
+            });
+        }
+
+        if (data._watched_ep < data._total_ep && data._total_ep) {
+            items.push({
+                title: Lampa.Lang.translate('shikimori_menu_seen') + ' ' + data._total_ep,
+                action: 'seen'
+            });
+        }
+
+        items.push({ title: Lampa.Lang.translate('shikimori_menu_open'), action: 'open' });
+
+        var enabled = Lampa.Controller.enabled().name;
+
+        Lampa.Select.show({
+            title: cardView(data).title,
+            items: items,
+            onSelect: function (item) {
+                Lampa.Controller.toggle(enabled);
+
+                if (item.action == 'hide') {
+                    var hidden = Hidden.toggle(sid);
+                    Lampa.Noty.show(Lampa.Lang.translate(hidden ? 'shikimori_noty_hidden' : 'shikimori_noty_unhidden'));
+                    if (hidden && data._card_el && data._card_el.parentNode) data._card_el.style.display = 'none';
+                }
+
+                if (item.action == 'seen') {
+                    markSeen(data);
+                    Lampa.Noty.show(Lampa.Lang.translate('shikimori_noty_seen'));
+                }
+
+                if (item.action == 'open') {
+                    if (data._direct_tmdb) openTmdbDirect(data._direct_tmdb);
+                    else Match.openCard(data);
+                }
+            },
+            onBack: function () {
+                Lampa.Controller.toggle(enabled);
+            }
+        });
+    }
+
+    // Проставить отметки просмотра до последней доступной серии — для тех,
+    // кто досматривал не в Lampa, чтобы тайтл перестал числиться новым
+    function markSeen(data) {
+        var name = data.original_name || data.original_title || '';
+        if (!name || !data._total_ep) return;
+
+        var season = 1;
+        for (var ep = 1; ep <= data._total_ep && ep <= 2000; ep++) {
+            try {
+                var hash = Lampa.Utils.hash([season, season > 10 ? ':' : '', ep, name].join(''));
+                Lampa.Timeline.update({ hash: hash, percent: 100, time: 0, duration: 0 });
+            }
+            catch (e) { return; }
+        }
+    }
+
     // Похоже ли на аниме. Закладка Lampa проходит через Utils.clearCard и хранит
     // только поля из белого списка: если тайтл добавляли с полной карточки, там
     // genres:[{id}], а не genre_ids, и жанр в закладке теряется. Поэтому смотрим
@@ -1560,6 +1650,12 @@
             this.card.addEventListener('visible', function () {
                 if (self.onVisible) self.onVisible(self.card, data);
             });
+
+            // Долгое нажатие — контекстное меню карточки (штатный жест Lampa)
+            data._card_el = this.card;
+            this.card.addEventListener('hover:long', function () {
+                cardMenu(data);
+            });
         };
 
         this.render = function (js) {
@@ -1722,10 +1818,9 @@
             updateMenuBadge(tracked);
 
             // Новые серии — доступны с озвучкой, не просмотрены и появились недавно
-            var fresh_after = Date.now() - KODIK_FRESH_DAYS * 86400000;
             var fresh = [];
             for (i = 0; i < tracked.length; i++) {
-                if (tracked[i].fresh > 0 && tracked[i].at >= fresh_after) fresh.push(tracked[i]);
+                if (isFresh(tracked[i])) fresh.push(tracked[i]);
             }
             fresh.sort(function (a, b) { return b.at - a.at; });
 
@@ -2740,6 +2835,7 @@
                 storSet('shikimori_genres_cache', null);
                 storSet('shikimori_user_id', null);
                 storSet('shikimori_kodik_eps', {});
+                storSet('shikimori_hidden', {});
                 Kodik.dropCache();
                 UserData.dropRatesCache();
                 Lampa.Noty.show(Lampa.Lang.translate('shikimori_settings_cache_cleared'));
@@ -2772,6 +2868,14 @@
             shikimori_title_menu: { ru: 'Меню', en: 'Menu', uk: 'Меню' },
             shikimori_title_watching: { ru: 'Я смотрю', en: 'Watching', uk: 'Я дивлюсь' },
             shikimori_title_later: { ru: 'Позже', en: 'Later', uk: 'Пізніше' },
+
+            shikimori_menu_hide: { ru: 'Не интересует', en: 'Not interested', uk: 'Не цікавить' },
+            shikimori_menu_unhide: { ru: 'Вернуть в «Новые серии»', en: 'Show in New episodes again', uk: 'Повернути в «Нові серії»' },
+            shikimori_menu_seen: { ru: 'Отметить просмотренным до серии', en: 'Mark watched up to episode', uk: 'Позначити переглянутим до серії' },
+            shikimori_menu_open: { ru: 'Открыть карточку', en: 'Open card', uk: 'Відкрити картку' },
+            shikimori_noty_hidden: { ru: 'Больше не покажем в «Новых сериях»', en: 'Hidden from New episodes', uk: 'Більше не покажемо' },
+            shikimori_noty_unhidden: { ru: 'Вернули в «Новые серии»', en: 'Back in New episodes', uk: 'Повернули' },
+            shikimori_noty_seen: { ru: 'Отмечено просмотренным', en: 'Marked as watched', uk: 'Позначено переглянутим' },
             shikimori_title_fresh: { ru: 'Новые серии', en: 'New episodes', uk: 'Нові серії' },
             shikimori_title_upcoming: { ru: 'Скоро выйдут', en: 'Airing soon', uk: 'Скоро вийдуть' },
             shikimori_title_popular_cub: { ru: 'Сейчас смотрят в Lampa', en: 'Now watching in Lampa', uk: 'Зараз дивляться в Lampa' },
@@ -3003,11 +3107,17 @@
         else badge.addClass('hide').text('');
     }
 
+    // Новое и не скрытое — этим живут и строка «Новые серии», и счётчик в меню
+    function isFresh(item) {
+        if (!(item.fresh > 0)) return false;
+        if (item.at < Date.now() - KODIK_FRESH_DAYS * 86400000) return false;
+        return !(item.kodik && Hidden.has(item.kodik.sid));
+    }
+
     function countFresh(items) {
-        var after = Date.now() - KODIK_FRESH_DAYS * 86400000;
         var count = 0;
         for (var i = 0; i < items.length; i++) {
-            if (items[i].fresh > 0 && items[i].at >= after) count++;
+            if (isFresh(items[i])) count++;
         }
         return count;
     }
