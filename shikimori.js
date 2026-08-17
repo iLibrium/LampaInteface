@@ -1728,6 +1728,7 @@
                     title: Lampa.Lang.translate('shikimori_title_fresh'),
                     results: fresh_cards,
                     shiki: true,
+                    line_type: 'shiki',
                     noimage: true,
                     nomore: true,
                     cardClass: function (elem) { return new ShikiCard(elem); }
@@ -1745,6 +1746,7 @@
                     title: Lampa.Lang.translate('shikimori_title_watching'),
                     results: watching_cards,
                     shiki: true,
+                    line_type: 'shiki',
                     noimage: true,
                     onMore: nick ? function () { openCatalog({ mode: 'mylist' }); } : null,
                     nomore: !nick,
@@ -1762,6 +1764,7 @@
                     title: Lampa.Lang.translate('shikimori_title_upcoming'),
                     results: upcoming_cards,
                     shiki: true,
+                    line_type: 'shiki',
                     noimage: true,
                     onMore: function () { openCatalog({ mode: 'calendar' }); },
                     cardClass: function (elem) { return new ShikiCard(elem); }
@@ -1782,6 +1785,7 @@
                     title: Lampa.Lang.translate(lines.popular_cub ? 'shikimori_title_popular_cub' : 'shikimori_title_popular_tmdb'),
                     results: lines.popular,
                     shiki: true,
+                    line_type: 'shiki',
                     noimage: true,
                     nomore: true,
                     cardClass: function (elem) { return new ShikiCard(elem); }
@@ -1801,6 +1805,8 @@
                             title: line.title,
                             results: lines[line.key],
                             shiki: true,
+                            line_type: 'shiki',
+                    line_type: 'shiki',
                             noimage: true,
                             onMore: function () { openCatalog({ filters: line.params }); },
                             cardClass: function (elem) { return new ShikiCard(elem); }
@@ -1820,6 +1826,7 @@
                     title: Lampa.Lang.translate('shikimori_title_later'),
                     results: later_cards,
                     shiki: true,
+                    line_type: 'shiki',
                     noimage: true,
                     nomore: true,
                     cardClass: function (elem) { return new ShikiCard(elem); }
@@ -2869,15 +2876,23 @@
             // Углы постера — четыре независимых слота: они не могут пересечься.
             // Штатный «+N» растянут во всю ширину по низу и налезает на маркер с рейтингом
             '.shikimori-card .card__new-episode{left:auto;right:0.4em;bottom:auto;top:0.5em;text-align:right}' +
-            // Заголовок в две строки вместо трёх. Резервировать место под три
-            // нельзя: у коротких названий год отъезжает от заголовка на две
-            // пустые строки — особенно заметно на телефоне, где переносов больше.
-            // Две строки и без резерва: год всегда вплотную, а разброс высоты
-            // падает с трёх строк до одной
-            '.shikimori-card .card__title{-webkit-line-clamp:2;line-clamp:2;max-height:2.4em}' +
+            // Блок заголовка ровно в две строки — фиксированной высоты, а не по
+            // содержимому. Иначе год у соседних карточек стоит на разной высоте
+            // и строка выглядит несобранной. Выровненность и «год вплотную»
+            // несовместимы при разной длине названий: выбран первый вариант,
+            // цена — одна пустая строка у коротких названий. Три строки, как в
+            // Lampa, брать нельзя — там цена уже две пустые
+            '.shikimori-card .card__title{-webkit-line-clamp:2;line-clamp:2;height:2.4em}' +
             // Год резервирует только свою строку — это не отрывает его от названия,
             // но выравнивает карточки, у которых года нет
             '.shikimori-card .card__age{min-height:1.2em}' +
+            // Подсказка, что строка прокручивается. Штатную «выглядывающую»
+            // карточку сделать нельзя: сколько карточек рисовать, Lampa решает
+            // сама, а InteractionMain пробрасывает в строку фиксированный набор
+            // параметров без нужного рычага. Затемнение у края даёт тот же сигнал
+            // и не трогает геометрию
+            '.items-line--type-shiki .items-line__body{position:relative}' +
+            '.items-line--type-shiki .items-line__body:after{content:"";position:absolute;top:0;bottom:0;right:0;width:2.5em;pointer-events:none;background:-webkit-linear-gradient(left,rgba(0,0,0,0),rgba(0,0,0,0.45));background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,0.45))}' +
             // Прогресс просмотра
             '.shikimori-progress{position:absolute;left:0;right:0;bottom:0;height:0.35em;background:rgba(0,0,0,0.55);border-radius:0 0 1em 1em;overflow:hidden;z-index:1}' +
             '.shikimori-progress i{display:block;height:100%;width:0;background:#57F570}' +
