@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '1.0.0';
+    var VERSION = '1.2.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -3339,6 +3339,20 @@
             name: manifest.name
         });
 
+        // Версия первой строкой: единственный способ с пульта понять, какая
+        // сборка реально загрузилась — плагин внедряется один раз при старте
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
+                name: 'shikimori_version',
+                type: 'static'
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_version') + ': ' + VERSION,
+                description: Lampa.Lang.translate('shikimori_settings_version_descr')
+            }
+        });
+
         Lampa.SettingsApi.addParam({
             component: 'shikimori',
             param: {
@@ -3677,6 +3691,8 @@
             shikimori_settings_kodik_descr: { ru: 'Серии, которые уже вышли с озвучкой (данные Kodik). Выключено — останутся только даты эфира в Японии', en: 'Episodes already released with a dub (Kodik). Off — Japanese air dates only', uk: 'Серії, що вже вийшли з озвучкою (Kodik)' },
             shikimori_settings_kodik_subs: { ru: 'Засчитывать субтитры', en: 'Count subtitles', uk: 'Зараховувати субтитри' },
             shikimori_settings_kodik_subs_descr: { ru: 'Показывать серию новой, если вышла только с субтитрами, без озвучки', en: 'Treat subtitle-only releases as new episodes', uk: 'Показувати серію новою, якщо вийшла лише із субтитрами' },
+            shikimori_settings_version: { ru: 'Версия плагина', en: 'Plugin version', uk: 'Версія плагіна' },
+            shikimori_settings_version_descr: { ru: 'Обновляется при перезапуске Lampa. Если версия старая — закройте приложение полностью и откройте заново', en: 'Updates when Lampa restarts', uk: 'Оновлюється під час перезапуску Lampa' },
             shikimori_settings_client_id: { ru: 'Client ID приложения Shikimori', en: 'Shikimori Client ID', uk: 'Client ID застосунку Shikimori' },
             shikimori_settings_client_id_descr: { ru: 'Создаётся на shikimori.io/oauth/applications, Redirect URI — urn:ietf:wg:oauth:2.0:oob, права user_rates', en: 'Create at shikimori.io/oauth/applications', uk: 'Створюється на shikimori.io/oauth/applications' },
             shikimori_settings_client_secret: { ru: 'Client Secret', en: 'Client Secret', uk: 'Client Secret' },
