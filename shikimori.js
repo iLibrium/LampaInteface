@@ -42,6 +42,8 @@
     var FAVORITES_WAIT = 2500;                // ждём синхронизацию закладок аккаунта, мс
     var BADGE_DELAY = 6000;                   // пересчёт счётчика в меню — после загрузки приложения
     var SEQUELS_MAX = 40;                     // сколько досмотренных тайтлов проверяем на продолжения
+    var OAUTH_REDIRECT = 'urn:ietf:wg:oauth:2.0:oob'; // код показывается на странице, сервер не нужен
+    var SYNC_MAX = 20;                        // сколько записей прогресса отправляем за раз
 
     var manifest = {
         type: 'video',
@@ -220,7 +222,8 @@
         xhr.ontimeout = function () { finish(err, 'timeout'); };
 
         try {
-            xhr.send(body ? JSON.stringify(body) : null);
+            // Строку шлём как есть — это форма OAuth, объект сериализуем в JSON
+            xhr.send(body ? (typeof body == 'string' ? body : JSON.stringify(body)) : null);
         }
         catch (e) {
             finish(err, 'send');
@@ -237,6 +240,22 @@
 
     NetPool.prototype.post = function (url, body, ok, err) {
         return this.req('POST', url, body, { 'Content-Type': 'application/json' }, ok, err);
+    };
+
+    // OAuth Shikimori принимает только форму, не JSON
+    NetPool.prototype.postForm = function (url, params, ok, err) {
+        var body = [];
+        for (var key in params) {
+            body.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]));
+        }
+        return this.req('POST', url, body.join('&'), { 'Content-Type': 'application/x-www-form-urlencoded' }, ok, err);
+    };
+
+    // Запрос от имени пользователя
+    NetPool.prototype.authed = function (method, url, token, body, ok, err) {
+        var headers = { 'Authorization': 'Bearer ' + token };
+        if (body) headers['Content-Type'] = 'application/json';
+        return this.req(method, url, body, headers, ok, err);
     };
 
     NetPool.prototype.clear = function () {
@@ -444,6 +463,129 @@
                 return img.indexOf('http') == 0 ? img : SHIKI_BASE + img;
             }
             return SHIKI_BASE + '/system/animes/original/' + (anime.id || '0') + '.jpg';
+        }
+    };
+
+    /* ============================================================
+     * Авторизация Shikimori (OAuth, поток для ТВ)
+     * ------------------------------------------------------------
+     * Ключи приложения не вшиты: их вписывают в настройки, потому что
+     * client_secret в публичном плагине не спрятать (PKCE у Shikimori нет).
+     * Поток «oob»: код показывается на странице, пользователь переносит его
+     * в приложение руками — колбэк-сервер для ТВ не нужен.
+     * Проверено живьём: и /oauth/token, и запись user_rates отдают CORS,
+     * а preflight пропускает Authorization.
+     * ============================================================ */
+
+    var Auth = {
+        clientId: function () {
+            return storString('shikimori_client_id', '');
+        },
+
+        clientSecret: function () {
+            return storString('shikimori_client_secret', '');
+        },
+
+        configured: function () {
+            return !!(this.clientId() && this.clientSecret());
+        },
+
+        data: function () {
+            var d = storGet('shikimori_oauth', {});
+            return d && typeof d == 'object' ? d : {};
+        },
+
+        save: function (d) {
+            storSet('shikimori_oauth', d);
+        },
+
+        connected: function () {
+            var d = this.data();
+            return !!(d.access_token && d.user_id);
+        },
+
+        nickname: function () {
+            return this.data().nickname || '';
+        },
+
+        logout: function () {
+            this.save({});
+        },
+
+        authorizeUrl: function () {
+            return SHIKI_BASE + '/oauth/authorize' +
+                '?client_id=' + encodeURIComponent(this.clientId()) +
+                '&redirect_uri=' + encodeURIComponent(OAUTH_REDIRECT) +
+                '&response_type=code&scope=user_rates';
+        },
+
+        // Код с сайта -> токены
+        exchange: function (net, code, ok, err) {
+            var self = this;
+            net.postForm(SHIKI_BASE + '/oauth/token', {
+                grant_type: 'authorization_code',
+                client_id: this.clientId(),
+                client_secret: this.clientSecret(),
+                code: code,
+                redirect_uri: OAUTH_REDIRECT
+            }, function (json) {
+                if (!json || !json.access_token) return err(json && json.error_description);
+                self.store(json);
+                self.identify(net, ok, err);
+            }, function () {
+                err('network');
+            });
+        },
+
+        // Токен живёт сутки, refresh при этом тоже меняется — сохраняем оба
+        refresh: function (net, ok, err) {
+            var self = this;
+            var d = this.data();
+            if (!d.refresh_token) return err('no_refresh');
+
+            net.postForm(SHIKI_BASE + '/oauth/token', {
+                grant_type: 'refresh_token',
+                client_id: this.clientId(),
+                client_secret: this.clientSecret(),
+                refresh_token: d.refresh_token
+            }, function (json) {
+                if (!json || !json.access_token) return err(json && json.error_description);
+                self.store(json);
+                ok(self.data().access_token);
+            }, function () {
+                err('network');
+            });
+        },
+
+        store: function (json) {
+            var d = this.data();
+            d.access_token = json.access_token;
+            d.refresh_token = json.refresh_token || d.refresh_token;
+            d.expires_at = Date.now() + ((json.expires_in || 86400) * 1000);
+            this.save(d);
+        },
+
+        identify: function (net, ok, err) {
+            var self = this;
+            var d = this.data();
+            net.authed('GET', SHIKI_BASE + '/api/users/whoami', d.access_token, null, function (user) {
+                // Без токена этот метод отвечает 200 и null — проверяем содержимое
+                if (!user || !user.id) return err('whoami');
+                d.user_id = user.id;
+                d.nickname = user.nickname || '';
+                self.save(d);
+                ok(d);
+            }, function () {
+                err('whoami');
+            });
+        },
+
+        // Отдаёт живой токен, обновляя его при необходимости
+        token: function (net, ok, err) {
+            var d = this.data();
+            if (!d.access_token) return err('no_token');
+            if (d.expires_at && Date.now() < d.expires_at - 60000) return ok(d.access_token);
+            this.refresh(net, ok, err);
         }
     };
 
@@ -717,6 +859,145 @@
             return !!map['s' + sid];
         }
     };
+
+    /* ============================================================
+     * Отправка прогресса в Shikimori
+     * ============================================================ */
+
+    var Sync = {
+        enabled: function () {
+            return storBool('shikimori_sync', false) && Auth.connected();
+        },
+
+        // Прогресс двигаем только вперёд и не трогаем статусы с оценками:
+        // испортить чужой список плагин не должен даже при своей ошибке
+        push: function (net, tracked, rates, done) {
+            if (!this.enabled()) return done(0);
+
+            var mals = (rates && rates.mals) || {};
+            var queue = [];
+
+            for (var i = 0; i < tracked.length; i++) {
+                var item = tracked[i];
+                var sid = item.kodik && item.kodik.sid;
+                if (!sid || !item.watched) continue;
+
+                var rate = mals[sid];
+                var seen = rate ? (rate.episodes || 0) : 0;
+                if (item.watched <= seen) continue;
+
+                queue.push({ sid: sid, episodes: item.watched, rate: rate });
+            }
+
+            if (!queue.length) return done(0);
+            queue = queue.slice(0, SYNC_MAX);
+
+            Auth.token(net, function (token) {
+                var index = 0;
+                var sent = 0;
+
+                function next() {
+                    if (index >= queue.length) return done(sent);
+                    var job = queue[index++];
+                    var method, url, body;
+
+                    if (job.rate && job.rate.id) {
+                        method = 'PATCH';
+                        url = SHIKI_BASE + '/api/v2/user_rates/' + job.rate.id;
+                        body = { user_rate: { episodes: job.episodes } };
+                    }
+                    else {
+                        method = 'POST';
+                        url = SHIKI_BASE + '/api/v2/user_rates';
+                        body = {
+                            user_rate: {
+                                user_id: Auth.data().user_id,
+                                target_id: job.sid,
+                                target_type: 'Anime',
+                                episodes: job.episodes,
+                                status: 'watching'
+                            }
+                        };
+                    }
+
+                    net.authed(method, url, token, body, function () {
+                        sent++;
+                        next();
+                    }, next);
+                }
+
+                next();
+            }, function () {
+                done(0);
+            });
+        }
+    };
+
+    // Подключение аккаунта: QR на экран, код вводится руками — колбэка на ТВ нет
+    function connectShikimori() {
+        if (!Auth.configured()) {
+            return Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_need_keys'));
+        }
+
+        var enabled = Lampa.Controller.enabled().name;
+
+        if (Auth.connected()) {
+            return Lampa.Select.show({
+                title: Auth.nickname() || Lampa.Lang.translate('shikimori_auth_connected'),
+                items: [{ title: Lampa.Lang.translate('shikimori_auth_logout'), action: 'logout' }],
+                onSelect: function () {
+                    Lampa.Controller.toggle(enabled);
+                    Auth.logout();
+                    Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_logged_out'));
+                },
+                onBack: function () { Lampa.Controller.toggle(enabled); }
+            });
+        }
+
+        var url = Auth.authorizeUrl();
+        var html = $('<div class="shikimori-auth">' +
+            '<div class="shikimori-auth__text">' + Lampa.Lang.translate('shikimori_auth_scan') + '</div>' +
+            '<div class="shikimori-auth__qr"></div>' +
+            '<div class="shikimori-auth__url">' + url + '</div>' +
+            '<div class="shikimori-auth__text">' + Lampa.Lang.translate('shikimori_auth_then_code') + '</div>' +
+        '</div>');
+
+        // qrcode(text, element) рисует SVG внутрь узла и ничего не возвращает
+        try { Lampa.Utils.qrcode(url, html.find('.shikimori-auth__qr')[0]); }
+        catch (e) { html.find('.shikimori-auth__qr').remove(); }
+
+        Lampa.Modal.open({
+            title: Lampa.Lang.translate('shikimori_auth_title'),
+            html: html,
+            onBack: function () {
+                Lampa.Modal.close();
+                Lampa.Controller.toggle(enabled);
+                askAuthCode(enabled);
+            }
+        });
+    }
+
+    function askAuthCode(enabled) {
+        Lampa.Input.edit({
+            title: Lampa.Lang.translate('shikimori_auth_code'),
+            value: '',
+            free: true,
+            nosave: true
+        }, function (code) {
+            Lampa.Controller.toggle(enabled);
+            code = String(code || '').replace(/\s+/g, '');
+            if (!code) return;
+
+            Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_checking'));
+            Auth.exchange(background_net, code, function (data) {
+                storSet('shikimori_user', data.nickname || storString('shikimori_user', ''));
+                UserData.dropRatesCache();
+                Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_ok') + ' ' + (data.nickname || ''));
+            }, function (reason) {
+                Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_fail') + (reason ? ': ' + reason : ''));
+            });
+        });
+    }
 
     // Выбор студий озвучки. Список собираем из тех, что встречаются в ваших
     // тайтлах: полный словарь Kodik — тысячи строк, с пульта это нелистаемо
@@ -1328,7 +1609,7 @@
                     for (var i = 0; i < flat.length; i++) {
                         var rate = flat[i];
                         if (!rate || !rate.target_id || rate.status == 'dropped') continue;
-                        mals[rate.target_id] = { status: rate.status, episodes: rate.episodes || 0, score: rate.score || 0 };
+                        mals[rate.target_id] = { id: rate.id, status: rate.status, episodes: rate.episodes || 0, score: rate.score || 0 };
                         if (rate.status == 'watching' || rate.status == 'rewatching') watching_ids.push(rate.target_id);
                     }
 
@@ -1964,6 +2245,12 @@
                 UserData.tracked(net, rates, function (items) {
                     lines.tracked = items;
                     join();
+
+                    // Прогресс, набранный в Lampa, уезжает в список Shikimori
+                    Sync.push(net, items, rates, function (sent) {
+                        if (sent) Lampa.Noty.show(Lampa.Lang.translate('shikimori_sync_done') + ': ' + sent);
+                    });
+
                     // Лента Kodik уже прогрета — общая строка идёт следом без запроса
                     UserData.released(net, function (cards) {
                         lines.released = cards;
@@ -2974,6 +3261,62 @@
         Lampa.SettingsApi.addParam({
             component: 'shikimori',
             param: {
+                name: 'shikimori_client_id',
+                type: 'input',
+                values: '',
+                default: ''
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_client_id'),
+                description: Lampa.Lang.translate('shikimori_settings_client_id_descr')
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
+                name: 'shikimori_client_secret',
+                type: 'input',
+                values: '',
+                default: ''
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_client_secret'),
+                description: Lampa.Lang.translate('shikimori_settings_client_secret_descr')
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
+                name: 'shikimori_connect',
+                type: 'button'
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_connect'),
+                description: Lampa.Lang.translate('shikimori_settings_connect_descr')
+            },
+            onChange: function () {
+                connectShikimori();
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
+                name: 'shikimori_sync',
+                type: 'trigger',
+                default: false
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_sync'),
+                description: Lampa.Lang.translate('shikimori_settings_sync_descr')
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'shikimori',
+            param: {
                 name: 'shikimori_card_style',
                 type: 'select',
                 values: {
@@ -3217,6 +3560,26 @@
             shikimori_settings_kodik_descr: { ru: 'Серии, которые уже вышли с озвучкой (данные Kodik). Выключено — останутся только даты эфира в Японии', en: 'Episodes already released with a dub (Kodik). Off — Japanese air dates only', uk: 'Серії, що вже вийшли з озвучкою (Kodik)' },
             shikimori_settings_kodik_subs: { ru: 'Засчитывать субтитры', en: 'Count subtitles', uk: 'Зараховувати субтитри' },
             shikimori_settings_kodik_subs_descr: { ru: 'Показывать серию новой, если вышла только с субтитрами, без озвучки', en: 'Treat subtitle-only releases as new episodes', uk: 'Показувати серію новою, якщо вийшла лише із субтитрами' },
+            shikimori_settings_client_id: { ru: 'Client ID приложения Shikimori', en: 'Shikimori Client ID', uk: 'Client ID застосунку Shikimori' },
+            shikimori_settings_client_id_descr: { ru: 'Создаётся на shikimori.io/oauth/applications, Redirect URI — urn:ietf:wg:oauth:2.0:oob, права user_rates', en: 'Create at shikimori.io/oauth/applications', uk: 'Створюється на shikimori.io/oauth/applications' },
+            shikimori_settings_client_secret: { ru: 'Client Secret', en: 'Client Secret', uk: 'Client Secret' },
+            shikimori_settings_client_secret_descr: { ru: 'Хранится только на этом устройстве и никуда не отправляется, кроме самого Shikimori', en: 'Kept on this device only', uk: 'Зберігається лише на цьому пристрої' },
+            shikimori_settings_connect: { ru: 'Подключить Shikimori', en: 'Connect Shikimori', uk: 'Підключити Shikimori' },
+            shikimori_settings_connect_descr: { ru: 'Покажем QR-код: подтверждаете вход с телефона и вводите код с экрана', en: 'Scan a QR on your phone and type the code back', uk: 'Покажемо QR-код' },
+            shikimori_settings_sync: { ru: 'Отправлять прогресс в Shikimori', en: 'Push progress to Shikimori', uk: 'Надсилати прогрес у Shikimori' },
+            shikimori_settings_sync_descr: { ru: 'Просмотренное в Lampa проставляется в вашем списке. Прогресс только увеличивается, статусы и оценки не трогаются', en: 'What you watch in Lampa is written to your list; progress only moves forward', uk: 'Переглянуте в Lampa проставляється у вашому списку' },
+            shikimori_auth_title: { ru: 'Подключение Shikimori', en: 'Connect Shikimori', uk: 'Підключення Shikimori' },
+            shikimori_auth_scan: { ru: 'Отсканируйте код телефоном и подтвердите вход', en: 'Scan with your phone and confirm', uk: 'Відскануйте код телефоном' },
+            shikimori_auth_then_code: { ru: 'Затем нажмите «Назад» — попросим ввести код с сайта', en: 'Then press Back and enter the code', uk: 'Потім натисніть «Назад»' },
+            shikimori_auth_code: { ru: 'Код с сайта Shikimori', en: 'Code from Shikimori', uk: 'Код із сайту Shikimori' },
+            shikimori_auth_checking: { ru: 'Проверяем код…', en: 'Checking…', uk: 'Перевіряємо код…' },
+            shikimori_auth_ok: { ru: 'Подключено:', en: 'Connected:', uk: 'Підключено:' },
+            shikimori_auth_fail: { ru: 'Не получилось подключить', en: 'Connection failed', uk: 'Не вдалося підключити' },
+            shikimori_auth_need_keys: { ru: 'Сначала впишите Client ID и Client Secret', en: 'Fill in Client ID and Secret first', uk: 'Спочатку впишіть Client ID і Secret' },
+            shikimori_auth_connected: { ru: 'Аккаунт подключён', en: 'Account connected', uk: 'Обліковий запис підключено' },
+            shikimori_auth_logout: { ru: 'Отключить аккаунт', en: 'Disconnect', uk: 'Відключити' },
+            shikimori_auth_logged_out: { ru: 'Аккаунт отключён', en: 'Disconnected', uk: 'Відключено' },
+            shikimori_sync_done: { ru: 'Отправлено в Shikimori', en: 'Pushed to Shikimori', uk: 'Надіслано в Shikimori' },
             shikimori_settings_studios: { ru: 'Студии озвучки', en: 'Dub studios', uk: 'Студії озвучення' },
             shikimori_settings_studios_descr: { ru: 'Считать серию вышедшей только когда её озвучили выбранные студии. Не выбрано — засчитывается любая озвучка', en: 'Count an episode as out only when your studios dubbed it', uk: 'Зараховувати серію лише від обраних студій' },
             shikimori_studios_any: { ru: 'Любая озвучка', en: 'Any studio', uk: 'Будь-яка озвучка' },
@@ -3287,6 +3650,12 @@
             '<style>' +
             // сетка каталога
             '.shikimori-catalog{-webkit-box-pack:justify!important;-webkit-justify-content:space-between!important;-ms-flex-pack:justify!important;justify-content:space-between!important}' +
+            // окно подключения аккаунта
+            '.shikimori-auth{text-align:center;padding:1em 0}' +
+            '.shikimori-auth__text{font-size:1.1em;margin:0.6em 0;opacity:0.9}' +
+            '.shikimori-auth__qr{display:inline-block;background:#fff;padding:0.8em;border-radius:0.5em;margin:0.8em 0}' +
+            '.shikimori-auth__qr img,.shikimori-auth__qr canvas,.shikimori-auth__qr svg{display:block;width:14em;height:14em}' +
+            '.shikimori-auth__url{font-size:0.8em;opacity:0.55;word-break:break-all;margin:0.6em 2em}' +
             // счётчик новых серий на пункте меню
             '.menu__item .shikimori-badge{margin-left:auto;background:#57F570;color:#17491C;font-size:0.8em;font-weight:700;min-width:1.7em;height:1.7em;line-height:1.7em;text-align:center;border-radius:1em;padding:0 0.4em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
             // неделя в шапке календаря
