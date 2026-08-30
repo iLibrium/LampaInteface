@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '3.2.1';
+    var VERSION = '3.3.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -1019,6 +1019,9 @@
             var names = [];
             if (card.original_name) names.push(card.original_name);
             if (card.original_title && names.indexOf(card.original_title) < 0) names.push(card.original_title);
+            // У карточек Shikimori нет original_*, но отметки Lampa записаны по
+            // оригинальному названию TMDB, а это как правило ромадзи из name
+            if (!names.length && card.name) names.push(card.name);
             if (!names.length) return null;
 
             var episode = 0;
@@ -2004,6 +2007,27 @@
                 ]);
             }
             else fresh.classList.add('hide');
+
+            // Прогресс раньше считался только для избранного и списков Shikimori,
+            // поэтому в лентах его не было даже у просмотренного. Отметки лежат
+            // локально, сеть не нужна — считаем для любой карточки
+            if (!data._watched_ep) {
+                var sid = parseInt(data.malId || data.id, 10);
+                var known = Kodik.known(sid);
+                var total = data._total_ep || (known ? known.ep : 0) ||
+                    parseInt(data.episodesAired, 10) || parseInt(data.episodes, 10) ||
+                    parseInt(data.number_of_episodes, 10) || 0;
+
+                var mark = Progress.lastWatched(data, total);
+                if (mark) {
+                    data._watched_ep = mark.episode;
+                    if (total >= mark.episode) data._total_ep = total;
+                    // Сколько осталось — только когда числа правдоподобны:
+                    // нумерация Kodik и отметок Lampa совпадает не всегда
+                    var left = total - mark.episode;
+                    if (!data._kodik_new && left > 0 && left <= FRESH_SANE_MAX) data._kodik_new = left;
+                }
+            }
 
             // Полоса прогресса по нижней кромке постера. Доля просмотренного читается
             // мгновенно и не зависит от того, двузначный номер серии или четырёхзначный
