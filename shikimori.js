@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '1.4.0';
+    var VERSION = '1.5.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -3875,19 +3875,39 @@
 
         Lampa.Template.add('shikimori_style',
             '<style>' +
-            // сетка каталога
-            '.shikimori-catalog{-webkit-box-pack:justify!important;-webkit-justify-content:space-between!important;-ms-flex-pack:justify!important;justify-content:space-between!important}' +
+            /* Шкала отступов, из неё выведено всё остальное:
+               s1 0.3em · s2 0.6em · s3 1em · s4 1.5em · s5 2.25em · s6 3.4em
+               Значения вне шкалы допустимы только как производные:
+               0.9em = s2+s1 (бейдж над полосой прогресса) */
+
+            // Сетка каталога. space-between раздавал остаток ширины между
+            // карточками, поэтому в каждом ряду зазоры были разные, а последний
+            // неполный ряд растягивался во всю ширину. Фиксированный шаг ровно
+            // такой же, как в горизонтальных строках
+            '.shikimori-catalog{-webkit-box-pack:start!important;-webkit-justify-content:flex-start!important;-ms-flex-pack:start!important;justify-content:flex-start!important}' +
+            '.shikimori-catalog>.card{margin-right:1em;margin-bottom:1.5em}' +
             // окно подключения аккаунта
             '.shikimori-auth{text-align:center;padding:1em 0}' +
             '.shikimori-auth__text{font-size:1.1em;margin:0.6em 0;opacity:0.9}' +
             '.shikimori-auth__qr{display:inline-block;background:#fff;padding:0.8em;border-radius:0.5em;margin:0.8em 0}' +
             '.shikimori-auth__qr img,.shikimori-auth__qr canvas,.shikimori-auth__qr svg{display:block;width:14em;height:14em}' +
             '.shikimori-auth__url{font-size:0.8em;opacity:0.55;word-break:break-all;margin:0.6em 2em}' +
+            // Размерные тиры. Медиазапросы про телевизор ничего не знают,
+            // поэтому класс ставится из JS по ширине экрана в em
+            '.shiki-tier--phone .shikimori-catalog>.card,.shiki-tier--phone .items-line .card{margin-right:1em}' +
+            '.shiki-tier--phone .items-line--type-shiki .items-line__body:after{width:1.5em}' +
+            '.shiki-tier--tablet .items-line--type-shiki .items-line__body:after{width:2.25em}' +
+            '.shiki-tier--tv .items-line--type-shiki .items-line__body:after{width:3.4em}' +
+            '.shiki-tier--tv .shikimori-action{height:3.4em;padding:0 1.5em}' +
+            // На телефоне четыре бейджа на постере в 135px — это шум.
+            // Оставляем только самый важный и полосу прогресса
+            '.shiki-tier--phone .shikimori-card .card__vote,.shiki-tier--phone .shikimori-card .card__marker{display:none}' +
+            '.shiki-tier--phone .shikimori-progress{height:0.4em}' +
             // счётчик новых серий на пункте меню
             '.menu__item .shikimori-badge{margin-left:auto;background:#57F570;color:#17491C;font-size:0.8em;font-weight:700;min-width:1.7em;height:1.7em;line-height:1.7em;text-align:center;border-radius:1em;padding:0 0.4em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
             // неделя в шапке календаря
-            '.shikimori-week{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;margin:0 0 1.2em 0}' +
-            '.shikimori-week__day{-webkit-box-flex:1;-webkit-flex:1 1 0;-ms-flex:1 1 0;flex:1 1 0;text-align:center;padding:0.7em 0.2em;margin-right:0.5em;border-radius:0.5em;background:rgba(255,255,255,0.08)}' +
+            '.shikimori-week{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;margin:0 0 1.5em 0}' +
+            '.shikimori-week__day{-webkit-box-flex:1;-webkit-flex:1 1 0;-ms-flex:1 1 0;flex:1 1 0;text-align:center;padding:0.6em 0.3em;margin-right:0.6em;border-radius:0.3em;background:rgba(255,255,255,0.08)}' +
             '.shikimori-week__day:last-child{margin-right:0}' +
             '.shikimori-week__day--today{background:rgba(255,255,255,0.18)}' +
             '.shikimori-week__day--empty{opacity:0.4}' +
@@ -3896,14 +3916,17 @@
             '.shikimori-week__count{font-size:1.1em;font-weight:700;color:#57F570}' +
             '.shikimori-week__day--empty .shikimori-week__count{color:inherit;font-weight:400}' +
             // заголовок дня в календаре — разрывает flex-строку
-            '.shikimori-day{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;font-size:1.4em;margin:0.6em 0 0.8em 0;opacity:0.75}' +
+            '.shikimori-day{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;font-size:1.4em;margin:0.6em 0 0.6em 0;opacity:0.75}' +
             // строка кнопок вместо ряда «Меню»
             '.items-line--type-actions .items-line__title{display:none}' +
             '.items-line--type-actions .items-line__head{display:none}' +
             '.items-line--type-actions .items-line__body{margin:0}' +
             '.items-line--type-actions{padding-top:0;padding-bottom:0}' +
-            '.shikimori-action{margin-right:1em;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-ms-flex-align:center;align-items:center}' +
-            '.shikimori-action__icon{display:block;width:1.4em;height:1.4em;margin-right:0.7em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
+            // Lampa вешает на элементы строки отступ с обеих сторон, поэтому зазор
+            // между кнопками выходил вдвое больше, чем между карточками. Левый снимаем,
+            // правый считаем от собственного кегля кнопки (1.3em): 0.8em ≈ 1em обычного текста
+            '.shikimori-action{margin-left:0;margin-right:0.8em;padding:0 1.2em;height:3.4em;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-ms-flex-align:center;align-items:center;-webkit-box-sizing:border-box;box-sizing:border-box;-webkit-border-radius:0.3em;border-radius:0.3em}' +
+            '.shikimori-action__icon{display:block;width:1.4em;height:1.4em;margin-right:0.6em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
             '.shikimori-action__icon svg{display:block;width:100%;height:100%}' +
             '.shikimori-action__title{white-space:nowrap;background:none!important;padding:0!important}' +
             // Вид по умолчанию — ровно штатная карточка Lampa: размеры не трогаем,
@@ -3912,7 +3935,9 @@
             '.shikimori-card--native .card__promo{display:none}' +
             // Углы постера — четыре независимых слота: они не могут пересечься.
             // Штатный «+N» растянут во всю ширину по низу и налезает на маркер с рейтингом
-            '.shikimori-card .card__new-episode{left:auto;right:0.4em;bottom:auto;top:0.5em;text-align:right}' +
+            '.shikimori-card .card__new-episode{left:auto;right:0.6em;bottom:auto;top:0.6em;text-align:right}' +
+            '.shikimori-card .card__vote{right:0.6em;bottom:0.6em}' +
+            '.shikimori-card .card__marker{left:0.6em;bottom:0.6em}' +
             // Блок заголовка ровно в две строки — фиксированной высоты, а не по
             // содержимому. Иначе год у соседних карточек стоит на разной высоте
             // и строка выглядит несобранной. Выровненность и «год вплотную»
@@ -3929,11 +3954,11 @@
             // параметров без нужного рычага. Затемнение у края даёт тот же сигнал
             // и не трогает геометрию
             '.items-line--type-shiki .items-line__body{position:relative}' +
-            '.items-line--type-shiki .items-line__body:after{content:"";position:absolute;top:0;bottom:0;right:0;width:2.5em;pointer-events:none;background:-webkit-linear-gradient(left,rgba(0,0,0,0),rgba(0,0,0,0.45));background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,0.45))}' +
+            '.items-line--type-shiki .items-line__body:after{content:"";position:absolute;top:0;bottom:0;right:0;width:2.25em;pointer-events:none;background:-webkit-linear-gradient(left,rgba(0,0,0,0),rgba(0,0,0,0.45));background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,0.45))}' +
             // Прогресс просмотра
-            '.shikimori-progress{position:absolute;left:0;right:0;bottom:0;height:0.35em;background:rgba(0,0,0,0.55);border-radius:0 0 1em 1em;overflow:hidden;z-index:1}' +
+            '.shikimori-progress{position:absolute;left:0;right:0;bottom:0;height:0.3em;background:rgba(0,0,0,0.55);border-radius:0 0 1em 1em;overflow:hidden;z-index:1}' +
             '.shikimori-progress i{display:block;height:100%;width:0;background:#57F570}' +
-            '.shikimori-card--progress .card__vote,.shikimori-card--progress .card__marker{bottom:0.75em}' +
+            '.shikimori-card--progress .card__vote,.shikimori-card--progress .card__marker{bottom:0.9em}' +
             '.shikimori-card--compact{width:9.5em}' +
             '.shikimori-card--compact .card__title{font-size:1.05em;-webkit-line-clamp:1;line-clamp:1;max-height:1.4em;min-height:1.4em}' +
             '.shikimori-card--compact .card__age{display:none}' +
@@ -3945,7 +3970,7 @@
             '.shikimori-card--poster .card__view{margin-bottom:0}' +
             '.shikimori-card--poster .card__promo{padding:2em 0.8em 0.8em 0.8em}' +
             '.shikimori-card--poster .card__promo-title{font-size:1.2em}' +
-            '.shikimori-card--poster .card__marker{bottom:auto;top:0.4em;left:0.4em}' +
+            '.shikimori-card--poster .card__marker{bottom:auto;top:0.6em;left:0.6em}' +
             // рейтинг Shikimori и строка следующей серии в полной карточке
             '.shikimori-rate{background:rgba(255,255,255,0.12)}' +
             '.shikimori-next{margin-left:0.5em;color:#57F570}' +
@@ -4052,6 +4077,52 @@
         if (params.nick && !storString('shikimori_user', '')) storSet('shikimori_user', params.nick);
     }
 
+    // Размерный тир: сколько em влезает по ширине. Именно em, а не пиксели —
+    // Lampa масштабирует корневой кегль вместе с экраном, поэтому пиксельные
+    // брейкпоинты тут не значат ничего. Телевизор медиазапросом не определяется
+    function currentTier() {
+        var w = window.innerWidth || document.documentElement.clientWidth || 1280;
+        var root = 16;
+        try { root = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16; }
+        catch (e) {}
+
+        var tv = false;
+        try { tv = !!(Lampa.Platform && Lampa.Platform.tv && Lampa.Platform.tv()); }
+        catch (e) {}
+        if (!tv) tv = /Tizen|Web0S|webOS|NetCast|Orsay|SmartTV|SMART-TV|HbbTV|BRAVIA|VIDAA|AFT/i.test(navigator.userAgent || '');
+        if (tv) return 'tv';
+
+        var em = w / root;
+        if (em < 45) return 'phone';
+        if (em < 66) return 'tablet';
+        return 'desktop';
+    }
+
+    function applyTier() {
+        var tier = currentTier();
+        var body = document.body;
+        if (!body) return;
+        var tiers = ['phone', 'tablet', 'desktop', 'tv'];
+        for (var i = 0; i < tiers.length; i++) {
+            if (tiers[i] != tier) body.classList.remove('shiki-tier--' + tiers[i]);
+        }
+        body.classList.add('shiki-tier--' + tier);
+    }
+
+    function watchTier() {
+        var timer = null;
+        applyTier();
+        function later() {
+            clearTimeout(timer);
+            timer = setTimeout(applyTier, 150);
+        }
+        try {
+            window.addEventListener('resize', later);
+            window.addEventListener('orientationchange', later);
+        }
+        catch (e) {}
+    }
+
     function startPlugin() {
         Lampa.Manifest.plugins = manifest;
 
@@ -4064,6 +4135,8 @@
 
         Lampa.Component.add(PLUGIN + '_main', MainComponent);
         Lampa.Component.add(PLUGIN + '_catalog', CatalogComponent);
+
+        watchTier();
 
         if (window.appready) addMenuButton();
         else {
