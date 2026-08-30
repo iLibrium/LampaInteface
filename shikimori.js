@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '3.2.0';
+    var VERSION = '3.2.1';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -2659,7 +2659,12 @@
 
             if (object.mode == 'catalog') {
                 head = this.buildHead();
-                scroll.append(head);
+                // Шапка ВНЕ прокрутки. Внутри неё position:sticky не работает:
+                // Lampa двигает содержимое трансформацией, а трансформированный
+                // предок отменяет прилипание. Поэтому шапка стоит отдельным
+                // блоком над списком и не уезжает вообще
+                html.appendChild(head);
+                scroll.minus(head);
             }
 
             scroll.append(body);
@@ -3220,8 +3225,10 @@
             Lampa.Controller.add('content', {
                 link: this,
                 toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render(true));
-                    Lampa.Controller.collectionFocus(last || false, scroll.render(true));
+                    // Собираем весь экран, а не только прокрутку: кнопки шапки
+                    // теперь снаружи, и иначе они выпадут из навигации
+                    Lampa.Controller.collectionSet(html);
+                    Lampa.Controller.collectionFocus(last || false, html);
                 },
                 left: function () {
                     if (Navigator.canmove('left')) Navigator.move('left');
@@ -3877,10 +3884,14 @@
             /* Кнопки стояли вплотную к краю, а карточки — с отступом сетки:
                выравниваем по одной линии. Закрепление сверху не даёт шапке
                уехать при прокрутке; где sticky нет, она просто прокрутится */
-            '.shikimori-head{padding-left:1em;padding-right:1em;' +
-                'position:-webkit-sticky;position:sticky;top:0;z-index:5;' +
-                'background:rgba(0,0,0,0.75)}' +
-            '.shikimori-head .simple-button{margin-bottom:0}' +
+            /* Строка, а не столбик: без display:flex кнопки — блоки во всю ширину.
+               Прокручивается по горизонтали, если не помещаются */
+            '.shikimori-head{display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;' +
+                '-webkit-box-orient:horizontal;-webkit-box-align:center;-webkit-align-items:center;' +
+                '-ms-flex-align:center;align-items:center;-webkit-flex-wrap:nowrap;-ms-flex-wrap:nowrap;flex-wrap:nowrap;' +
+                'overflow-x:auto;overflow-y:hidden;padding:0 1em 1em 1em}' +
+            '.shikimori-head .shikimori-action{-webkit-box-flex:0;-webkit-flex:0 0 auto;-ms-flex:0 0 auto;flex:0 0 auto;' +
+                'margin-bottom:0;width:auto}' +
 
             /* --- Каталог: тот же шаг, что в строках, ширина от контейнера --- */
             '.shikimori-catalog{-webkit-box-pack:start!important;-webkit-justify-content:flex-start!important;' +
