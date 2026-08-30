@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '3.3.0';
+    var VERSION = '3.3.2';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -1684,21 +1684,31 @@
 
                     // Озвучка не может опережать эфир: если Kodik насчитал больше,
                     // чем вышло в Японии, верить надо меньшему числу
+                    var sids = [];
+                    for (j = 0; j < seasons.length; j++) sids.push(seasons[j].mal);
+
                     var total = best ? countAvailable(best.info) : 0;
                     var mark = Progress.lastWatched(card, total);
                     var watched = mark ? mark.episode : 0;
+
+                    // Тайтл может быть и в закладках, и в списке Shikimori.
+                    // Раньше здесь смотрели только отметки Lampa, а точное число
+                    // из списка игнорировалось — и прогресс пропадал у всех,
+                    // кто смотрит не в Lampa. Берём большее из двух
+                    for (j = 0; j < sids.length; j++) {
+                        var rate_here = mals[sids[j]];
+                        if (rate_here && (rate_here.episodes || 0) > watched) watched = rate_here.episodes;
+                    }
                     var fresh = 0;
                     var airing = false;
 
                     if (best) {
+                        // Число «+N» означает «столько вы не смотрели». Считать его
+                        // от базы первой встречи нельзя: получалось «+1» у тайтла,
+                        // где не просмотрено пять. Нет прогресса — нет числа,
+                        // тайтл просто помечается выходящим
                         var aligned = !best.season || !mark || mark.season == best.season;
-                        fresh = (watched && aligned) ? total - watched : total - (best.info.base || total);
-
-                        // Прогресс из отметок Lampa идёт в нумерации TMDB, а Kodik
-                        // считает серии подряд по всему тайтлу. У длинных сериалов
-                        // это расходится на сотни, поэтому неправдоподобной разнице
-                        // мы не верим и показываем тайтл без числа
-                        if (fresh > FRESH_SANE_MAX) fresh = 0;
+                        fresh = (watched && aligned) ? total - watched : 0;
                         if (watched > total) fresh = 0;
 
                         // Прогресса нет вовсе — сравнивать не с чем, и база первой
@@ -1706,11 +1716,11 @@
                         // на днях, это ровно та новость, ради которой тайтл в избранном.
                         // Условие именно «прогресса нет»: раньше сюда попадало и
                         // «нет непросмотренных», из-за чего досмотренное не уходило
-                        airing = !watched && best.info.at >= Date.now() - KODIK_FRESH_DAYS * 86400000;
+                        // Показывать тайтл и показывать число — разные вопросы.
+                        // Свежая озвучка означает, что смотреть есть что, даже если
+                        // непросмотренных полторы тысячи, как у долгоиграющих
+                        airing = best.info.at >= Date.now() - KODIK_FRESH_DAYS * 86400000 && (!watched || fresh > 0);
                     }
-
-                    var sids = [];
-                    for (j = 0; j < seasons.length; j++) sids.push(seasons[j].mal);
 
                     var fav_status = '';
                     for (j = 0; j < sids.length; j++) {
@@ -1993,7 +2003,10 @@
             // Данные Kodik важнее: там серия уже с озвучкой, а не просто вышла в Японии
             var fresh = this.card.querySelector('.card__new-episode');
             var unwatched = 0;
-            if (data._kodik_new > 0) {
+            // Число на бейдже должно быть обозримым: «+1154 серии» ничего не
+            // сообщает, кроме того, что сериал длинный. Сам тайтл при этом
+            // остаётся в строке, просто без числа
+            if (data._kodik_new > 0 && data._kodik_new <= FRESH_SANE_MAX) {
                 unwatched = data._kodik_new;
             }
             else if (typeof data._rate_episodes == 'number' && data.episodesAired) {
