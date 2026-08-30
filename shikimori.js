@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '2.1.0';
+    var VERSION = '2.2.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -924,19 +924,32 @@
     /* ============================================================
      * Аккаунт Shikimori
      * ------------------------------------------------------------
-     * Два разных уровня, и путать их нельзя:
-     *   ник   — только чтение публичных списков, подключать ничего не надо
-     *   OAuth — запись прогресса обратно в ваш список
-     * Ключи приложения набрать с пульта невозможно: секрет длиной 43 символа.
-     * Поэтому они принимаются в адресе плагина — вписываются один раз на
-     * телефоне или компьютере, а на телевизор приезжают синхронизацией.
-     * На самом телевизоре остаётся ввести только короткий код с экрана.
+     * Почему на телевизоре нет входа по OAuth и не будет.
+     * Shikimori сделан на Doorkeeper: и client_secret, и код авторизации —
+     * строки порядка 43 символов. Device-flow (когда код показывают на ТВ,
+     * а подтверждают телефоном) Shikimori не поддерживает, своего сервера
+     * у плагина нет. Значит на телевизор в любом случае пришлось бы вносить
+     * длинную строку с пульта — этого мы делать не заставляем.
+     *
+     * Поэтому уровни разведены по устройствам:
+     *   телевизор — ник: читает публичные списки, вводится один раз, коротко
+     *   телефон   — полное подключение: там ввод и вставка работают нормально
+     * Прогресс, записанный с телефона, телевизор увидит через тот же ник.
+     * Плагин на телефоне появится сам: список плагинов ездит через аккаунт.
      * ============================================================ */
 
     function accountScreen() {
         var enabled = Lampa.Controller.enabled().name;
         var nick = storString('shikimori_user', '');
+        var tv = currentTier() == 'tv';
         var items = [];
+
+        items.push({
+            title: nick ? (Lampa.Lang.translate('shikimori_acc_change_nick') + ': ' + nick)
+                        : Lampa.Lang.translate('shikimori_acc_set_nick'),
+            subtitle: Lampa.Lang.translate('shikimori_acc_nick_hint'),
+            action: 'nick'
+        });
 
         if (Auth.connected()) {
             items.push({
@@ -945,28 +958,28 @@
                 action: 'logout'
             });
         }
+        else if (tv) {
+            // На телевизоре предлагать нечего, кроме объяснения — но объяснить
+            // надо, иначе выглядит как будто функции просто нет
+            items.push({
+                title: Lampa.Lang.translate('shikimori_acc_why'),
+                subtitle: Lampa.Lang.translate('shikimori_acc_why_hint'),
+                action: 'why'
+            });
+        }
+        else if (Auth.configured()) {
+            items.push({
+                title: Lampa.Lang.translate('shikimori_acc_signin'),
+                subtitle: Lampa.Lang.translate('shikimori_acc_signin_hint'),
+                action: 'signin'
+            });
+        }
         else {
             items.push({
-                title: nick ? (Lampa.Lang.translate('shikimori_acc_change_nick') + ': ' + nick)
-                            : Lampa.Lang.translate('shikimori_acc_set_nick'),
-                subtitle: Lampa.Lang.translate('shikimori_acc_nick_hint'),
-                action: 'nick'
+                title: Lampa.Lang.translate('shikimori_acc_keys'),
+                subtitle: Lampa.Lang.translate('shikimori_acc_keys_hint'),
+                action: 'keys'
             });
-
-            if (Auth.configured()) {
-                items.push({
-                    title: Lampa.Lang.translate('shikimori_acc_signin'),
-                    subtitle: Lampa.Lang.translate('shikimori_acc_signin_hint'),
-                    action: 'signin'
-                });
-            }
-            else {
-                items.push({
-                    title: Lampa.Lang.translate('shikimori_acc_setup'),
-                    subtitle: Lampa.Lang.translate('shikimori_acc_setup_hint'),
-                    action: 'setup'
-                });
-            }
         }
 
         Lampa.Select.show({
@@ -975,7 +988,8 @@
             onSelect: function (item) {
                 Lampa.Controller.toggle(enabled);
                 if (item.action == 'nick') askNickname();
-                if (item.action == 'setup') setupInstructions(enabled);
+                if (item.action == 'why') explainOnPhone(enabled);
+                if (item.action == 'keys') askKeys(enabled);
                 if (item.action == 'signin') signInWithQr(enabled);
                 if (item.action == 'logout') {
                     Auth.logout();
@@ -986,11 +1000,40 @@
         });
     }
 
-    // Что нужно сделать НЕ на телевизоре. Шаги пронумерованы, адрес готовый —
-    // переписывать с экрана нечего, кроме двух ключей из своего приложения
-    function setupInstructions(enabled) {
+    // Телевизор: объясняем, почему тут этого нет и где делать
+    function explainOnPhone(enabled) {
+        var html = $('<div class="shikimori-auth">' +
+            '<div class="shikimori-auth__lead"></div>' +
+            '<ol class="shikimori-steps"></ol>' +
+        '</div>');
+
+        html.find('.shikimori-auth__lead').text(Lampa.Lang.translate('shikimori_why_lead'));
+
+        var steps = [
+            Lampa.Lang.translate('shikimori_why_1'),
+            Lampa.Lang.translate('shikimori_why_2'),
+            Lampa.Lang.translate('shikimori_why_3')
+        ];
+
+        for (var i = 0; i < steps.length; i++) {
+            var li = $('<li></li>');
+            li.text(steps[i]);
+            html.find('.shikimori-steps').append(li);
+        }
+
+        Lampa.Modal.open({
+            title: Lampa.Lang.translate('shikimori_why_title'),
+            html: html,
+            onBack: function () {
+                Lampa.Modal.close();
+                Lampa.Controller.toggle(enabled);
+            }
+        });
+    }
+
+    // Телефон и компьютер: ключи вставляются в поля, там это нормально
+    function askKeys(enabled) {
         var apps = SHIKI_BASE + '/oauth/applications';
-        var self_url = selfUrl() || 'https://ilibrium.github.io/LampaInteface/shikimori.js';
 
         var html = $('<div class="shikimori-auth">' +
             '<div class="shikimori-auth__lead"></div>' +
@@ -998,14 +1041,12 @@
             '<ol class="shikimori-steps"></ol>' +
         '</div>');
 
-        html.find('.shikimori-auth__lead').text(Lampa.Lang.translate('shikimori_setup_lead'));
+        html.find('.shikimori-auth__lead').text(Lampa.Lang.translate('shikimori_keys_lead'));
 
         var steps = [
-            Lampa.Lang.translate('shikimori_setup_1') + ' ' + apps,
-            Lampa.Lang.translate('shikimori_setup_2'),
-            Lampa.Lang.translate('shikimori_setup_3'),
-            Lampa.Lang.translate('shikimori_setup_4') + ' ' + self_url + '?cid=ВАШ_ID&cs=ВАШ_SECRET',
-            Lampa.Lang.translate('shikimori_setup_5')
+            Lampa.Lang.translate('shikimori_keys_1') + ' ' + apps,
+            Lampa.Lang.translate('shikimori_keys_2'),
+            Lampa.Lang.translate('shikimori_keys_3')
         ];
 
         for (var i = 0; i < steps.length; i++) {
@@ -1018,16 +1059,47 @@
         catch (e) { html.find('.shikimori-auth__qr').remove(); }
 
         Lampa.Modal.open({
-            title: Lampa.Lang.translate('shikimori_setup_title'),
+            title: Lampa.Lang.translate('shikimori_keys_title'),
             html: html,
             onBack: function () {
                 Lampa.Modal.close();
                 Lampa.Controller.toggle(enabled);
+                askClientId(enabled);
             }
         });
     }
 
-    // Ключи уже есть: QR на согласие, затем сразу просим короткий код
+    function askClientId(enabled) {
+        Lampa.Input.edit({
+            title: Lampa.Lang.translate('shikimori_settings_client_id'),
+            value: storString('shikimori_client_id', ''),
+            free: true,
+            nosave: true
+        }, function (value) {
+            value = String(value || '').replace(/\s+/g, '');
+            if (!value) { Lampa.Controller.toggle(enabled); return; }
+            storSet('shikimori_client_id', value);
+            askClientSecret(enabled);
+        });
+    }
+
+    function askClientSecret(enabled) {
+        Lampa.Input.edit({
+            title: Lampa.Lang.translate('shikimori_settings_client_secret'),
+            value: storString('shikimori_client_secret', ''),
+            free: true,
+            nosave: true
+        }, function (value) {
+            value = String(value || '').replace(/\s+/g, '');
+            Lampa.Controller.toggle(enabled);
+            if (!value) return;
+            storSet('shikimori_client_secret', value);
+            Lampa.Noty.show(Lampa.Lang.translate('shikimori_keys_saved'));
+            signInWithQr(enabled);
+        });
+    }
+
+    // Ключи есть: QR на согласие, затем код с сайта
     function signInWithQr(enabled) {
         var url = Auth.authorizeUrl();
 
@@ -3957,25 +4029,32 @@
             shikimori_acc_title: { ru: 'Аккаунт Shikimori', en: 'Shikimori account', uk: 'Обліковий запис Shikimori' },
             shikimori_acc_set_nick: { ru: 'Указать ник', en: 'Set username', uk: 'Вказати нік' },
             shikimori_acc_change_nick: { ru: 'Сменить ник', en: 'Change username', uk: 'Змінити нік' },
-            shikimori_acc_nick_hint: { ru: 'Показывать ваши списки и прогресс. Ничего подключать не нужно', en: 'Shows your lists and progress. Nothing to connect', uk: 'Показувати ваші списки й прогрес' },
-            shikimori_acc_setup: { ru: 'Настроить запись прогресса', en: 'Set up progress writing', uk: 'Налаштувати запис прогресу' },
-            shikimori_acc_setup_hint: { ru: 'Понадобится телефон или компьютер, один раз, 3 минуты', en: 'Needs a phone or computer once', uk: 'Знадобиться телефон або комп’ютер' },
+            shikimori_acc_nick_hint: { ru: 'Показывает ваши списки и прогресс. Больше на телевизоре ничего не нужно', en: 'Shows your lists and progress. Nothing else is needed on a TV', uk: 'Показує ваші списки й прогрес' },
+            shikimori_acc_why: { ru: 'Запись прогресса — почему её тут нет', en: 'Writing progress — why it is not here', uk: 'Запис прогресу — чому його тут немає' },
+            shikimori_acc_why_hint: { ru: 'Настраивается в Lampa на телефоне, один раз', en: 'Set up in Lampa on your phone, once', uk: 'Налаштовується в Lampa на телефоні' },
+            shikimori_acc_keys: { ru: 'Подключить запись прогресса', en: 'Connect progress writing', uk: 'Підключити запис прогресу' },
+            shikimori_acc_keys_hint: { ru: 'Создать приложение Shikimori и вставить два ключа', en: 'Create a Shikimori application and paste two keys', uk: 'Створити застосунок Shikimori і вставити два ключі' },
             shikimori_acc_signin: { ru: 'Войти по QR-коду', en: 'Sign in with QR', uk: 'Увійти за QR' },
-            shikimori_acc_signin_hint: { ru: 'Ключи уже есть — подтвердите вход с телефона', en: 'Keys are in place, confirm on your phone', uk: 'Ключі вже є — підтвердьте з телефона' },
+            shikimori_acc_signin_hint: { ru: 'Ключи уже сохранены — подтвердите вход', en: 'Keys are saved, confirm the sign-in', uk: 'Ключі вже збережено' },
             shikimori_acc_connected_hint: { ru: 'Подключён:', en: 'Connected:', uk: 'Підключено:' },
             shikimori_acc_logout: { ru: 'Отключить аккаунт', en: 'Disconnect account', uk: 'Відключити обліковий запис' },
 
-            shikimori_setup_title: { ru: 'Запись прогресса в Shikimori', en: 'Writing progress to Shikimori', uk: 'Запис прогресу в Shikimori' },
-            shikimori_setup_lead: { ru: 'Ключи приложения с пульта не набрать, поэтому плагин принимает их в своём адресе. Делается один раз — на телефоне или компьютере, под тем же аккаунтом Lampa.', en: 'App keys cannot be typed on a remote, so the plugin takes them in its URL. Do this once on a phone or computer.', uk: 'Ключі застосунку з пульта не набрати, тому плагін приймає їх у своїй адресі.' },
-            shikimori_setup_1: { ru: 'Откройте на телефоне (QR выше):', en: 'Open on your phone (QR above):', uk: 'Відкрийте на телефоні (QR вище):' },
-            shikimori_setup_2: { ru: 'Создайте приложение. Redirect URI: urn:ietf:wg:oauth:2.0:oob, права: user_rates', en: 'Create an application. Redirect URI: urn:ietf:wg:oauth:2.0:oob, scope: user_rates', uk: 'Створіть застосунок. Redirect URI: urn:ietf:wg:oauth:2.0:oob, права: user_rates' },
-            shikimori_setup_3: { ru: 'Скопируйте оттуда Client ID и Client Secret', en: 'Copy the Client ID and Client Secret', uk: 'Скопіюйте Client ID і Client Secret' },
-            shikimori_setup_4: { ru: 'Там же в Lampa переустановите плагин по адресу с ключами:', en: 'Reinstall the plugin there with the keys in the URL:', uk: 'Там само перевстановіть плагін за адресою з ключами:' },
-            shikimori_setup_5: { ru: 'Телевизор получит плагин с ключами по синхронизации аккаунта Lampa. После этого здесь появится «Войти по QR-коду».', en: 'The TV picks the plugin up through Lampa account sync; then "Sign in with QR" appears here.', uk: 'Телевізор отримає плагін із ключами через синхронізацію.' },
+            shikimori_why_title: { ru: 'Запись прогресса в Shikimori', en: 'Writing progress to Shikimori', uk: 'Запис прогресу в Shikimori' },
+            shikimori_why_lead: { ru: 'На телевизоре этого нет намеренно. Shikimori требует ключ приложения и код авторизации — обе строки примерно по 43 символа, а способа подтвердить вход с телефона без ввода на телевизоре он не поддерживает. Заставлять набирать такое с пульта неправильно.', en: 'Deliberately absent on TV: Shikimori needs two 43-character strings and has no device flow.', uk: 'На телевізорі цього немає навмисно: Shikimori вимагає два довгі рядки й не має device-flow.' },
+            shikimori_why_1: { ru: 'Откройте Lampa на телефоне под тем же аккаунтом — плагин там появится сам, список плагинов синхронизируется.', en: 'Open Lampa on your phone under the same account; the plugin syncs there by itself.', uk: 'Відкрийте Lampa на телефоні під тим самим акаунтом.' },
+            shikimori_why_2: { ru: 'Там в разделе «Аниме» → «Аккаунт Shikimori» подключите запись прогресса: ввод и вставка на телефоне работают нормально.', en: 'There, connect progress writing — typing and pasting work fine on a phone.', uk: 'Там підключіть запис прогресу.' },
+            shikimori_why_3: { ru: 'Телевизору подключение не нужно: он видит ваш прогресс через ник, а записывает его телефон.', en: 'The TV needs no connection: it reads your progress by nickname while the phone writes it.', uk: 'Телевізору підключення не потрібне.' },
+
+            shikimori_keys_title: { ru: 'Приложение Shikimori', en: 'Shikimori application', uk: 'Застосунок Shikimori' },
+            shikimori_keys_lead: { ru: 'Нужно своё приложение Shikimori — плагин не хранит общих ключей. Создаётся один раз, дальше только вставить два значения.', en: 'You need your own Shikimori application; the plugin ships no shared keys.', uk: 'Потрібен власний застосунок Shikimori.' },
+            shikimori_keys_1: { ru: 'Откройте (QR выше):', en: 'Open (QR above):', uk: 'Відкрийте (QR вище):' },
+            shikimori_keys_2: { ru: 'Создайте приложение. Redirect URI: urn:ietf:wg:oauth:2.0:oob, права: user_rates', en: 'Create an application. Redirect URI: urn:ietf:wg:oauth:2.0:oob, scope: user_rates', uk: 'Створіть застосунок.' },
+            shikimori_keys_3: { ru: 'Нажмите «Назад» — плагин попросит вставить Client ID и Client Secret', en: 'Press Back and paste the Client ID and Client Secret', uk: 'Натисніть «Назад» і вставте ключі' },
+            shikimori_keys_saved: { ru: 'Ключи сохранены', en: 'Keys saved', uk: 'Ключі збережено' },
 
             shikimori_signin_title: { ru: 'Вход в Shikimori', en: 'Sign in to Shikimori', uk: 'Вхід у Shikimori' },
-            shikimori_signin_lead: { ru: 'Отсканируйте код телефоном и подтвердите вход. Shikimori покажет короткий код.', en: 'Scan with your phone and confirm. Shikimori will show a short code.', uk: 'Відскануйте код телефоном і підтвердьте вхід.' },
-            shikimori_signin_then: { ru: 'Затем нажмите «Назад» — плагин попросит ввести этот код', en: 'Then press Back and enter that code', uk: 'Потім натисніть «Назад» і введіть цей код' },
+            shikimori_signin_lead: { ru: 'Отсканируйте код и подтвердите вход. Shikimori покажет код авторизации.', en: 'Scan and confirm. Shikimori will show an authorization code.', uk: 'Відскануйте код і підтвердьте вхід.' },
+            shikimori_signin_then: { ru: 'Затем нажмите «Назад» и вставьте этот код', en: 'Then press Back and paste that code', uk: 'Потім натисніть «Назад» і вставте цей код' },
 
             shikimori_nick_checking: { ru: 'Проверяем профиль…', en: 'Checking the profile…', uk: 'Перевіряємо профіль…' },
             shikimori_nick_ok: { ru: 'Нашли тайтлов:', en: 'Titles found:', uk: 'Знайдено тайтлів:' },
