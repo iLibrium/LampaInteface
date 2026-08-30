@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '3.1.1';
+    var VERSION = '3.2.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -2708,35 +2708,95 @@
             return head_el;
         };
 
+        // Три кнопки, как в родном каталоге Lampa: поиск, сортировка, фильтр.
+        // Одиннадцать кнопок в строку — это десять нажатий пультом до последней,
+        // и все они одного веса. Категории фильтра живут внутри одного списка,
+        // где выбранное значение видно подписью
         this.filterButtons = function () {
             var f = object.filters;
             var list = [
                 { key: 'search', icon: ICON_SEARCH, title: Lampa.Lang.translate('shikimori_chip_search'), value: f.search },
+                { key: 'order', icon: ICON_SORT, title: Lampa.Lang.translate('shikimori_chip_order'),
+                  value: f.order ? Lampa.Lang.translate('shikimori_order_' + f.order) : '' },
+                { key: 'filter', icon: ICON_FILTER, title: Lampa.Lang.translate('shikimori_chip_filter'),
+                  value: this.activeCount() ? String(this.activeCount()) : '' }
+            ];
+
+            if (this.activeCount() || f.search || f.order) {
+                list.push({ key: 'reset', title: Lampa.Lang.translate('shikimori_chip_reset') });
+            }
+            return list;
+        };
+
+        // Сколько условий выставлено — это число и стоит на кнопке «Фильтр»
+        this.activeCount = function () {
+            var keys = ['genre', 'theme', 'demographic', 'kind', 'status', 'season', 'score', 'duration', 'rating'];
+            var n = 0;
+            for (var i = 0; i < keys.length; i++) {
+                var v = object.filters[keys[i]];
+                if (!v) continue;
+                n += (keys[i] == 'genre' || keys[i] == 'theme' || keys[i] == 'demographic')
+                    ? String(v).split(',').filter(function (x) { return x; }).length
+                    : 1;
+            }
+            return n;
+        };
+
+        this.filterCategories = function () {
+            return [
                 { key: 'genre', title: Lampa.Lang.translate('shikimori_chip_genre'), value: this.genreLabel('genre') },
                 { key: 'theme', title: Lampa.Lang.translate('shikimori_chip_theme'), value: this.genreLabel('theme') },
                 { key: 'demographic', title: Lampa.Lang.translate('shikimori_chip_demographic'), value: this.genreLabel('demographic') },
                 { key: 'kind', title: Lampa.Lang.translate('shikimori_chip_kind'), value: this.enumLabel('kind', FILTER_KINDS, 'shikimori_kind_') },
                 { key: 'status', title: Lampa.Lang.translate('shikimori_chip_status'), value: this.enumLabel('status', FILTER_STATUSES, 'shikimori_status_filter_') },
                 { key: 'season', title: Lampa.Lang.translate('shikimori_chip_season'), value: this.seasonLabel() },
-                { key: 'score', title: Lampa.Lang.translate('shikimori_chip_score'), value: f.score ? (Lampa.Lang.translate('shikimori_score_from') + ' ' + f.score) : '' },
+                { key: 'score', title: Lampa.Lang.translate('shikimori_chip_score'),
+                  value: object.filters.score ? (Lampa.Lang.translate('shikimori_score_from') + ' ' + object.filters.score) : '' },
                 { key: 'duration', title: Lampa.Lang.translate('shikimori_chip_duration'), value: this.enumLabel('duration', FILTER_DURATIONS, 'shikimori_duration_') },
-                { key: 'rating', title: Lampa.Lang.translate('shikimori_chip_rating'), value: this.enumLabel('rating', FILTER_RATINGS, 'shikimori_rating_') },
-                { key: 'order', title: Lampa.Lang.translate('shikimori_chip_order'), value: f.order ? Lampa.Lang.translate('shikimori_order_' + f.order) : '' }
+                { key: 'rating', title: Lampa.Lang.translate('shikimori_chip_rating'), value: this.enumLabel('rating', FILTER_RATINGS, 'shikimori_rating_') }
             ];
+        };
 
-            for (var i = 0; i < list.length; i++) {
-                if (list[i].key != 'search' && list[i].value) {
-                    list.push({ key: 'reset', title: Lampa.Lang.translate('shikimori_chip_reset') });
-                    break;
-                }
-            }
-            if (object.filters.search) {
-                var has_reset = false;
-                for (i = 0; i < list.length; i++) if (list[i].key == 'reset') has_reset = true;
-                if (!has_reset) list.push({ key: 'reset', title: Lampa.Lang.translate('shikimori_chip_reset') });
+        // Список категорий: подпись под каждой — что выбрано сейчас
+        this.openFilterMenu = function () {
+            var enabled = Lampa.Controller.enabled().name;
+            var cats = this.filterCategories();
+            var items = [];
+            var any = Lampa.Lang.translate('shikimori_any');
+
+            for (var i = 0; i < cats.length; i++) {
+                items.push({
+                    title: cats[i].title,
+                    subtitle: cats[i].value || any,
+                    key: cats[i].key
+                });
             }
 
-            return list;
+            if (this.activeCount()) {
+                items.push({
+                    title: Lampa.Lang.translate('shikimori_chip_reset_filters'),
+                    subtitle: Lampa.Lang.translate('shikimori_chip_reset_hint'),
+                    key: 'reset_filters'
+                });
+            }
+
+            Lampa.Select.show({
+                title: Lampa.Lang.translate('shikimori_chip_filter'),
+                items: items,
+                onSelect: function (item) {
+                    if (item.key == 'reset_filters') {
+                        var keys = ['genre', 'theme', 'demographic', 'kind', 'status', 'season', 'score', 'duration', 'rating'];
+                        for (var j = 0; j < keys.length; j++) object.filters[keys[j]] = '';
+                        Lampa.Controller.toggle(enabled);
+                        self.updateHead();
+                        self.reload();
+                        return;
+                    }
+                    // Из категории возвращаемся обратно в список, а не наружу
+                    self.openFilter(item.key, function () { self.openFilterMenu(); });
+                },
+                onBack: function () { Lampa.Controller.toggle(enabled); }
+            });
         };
 
         this.updateHead = function () {
@@ -2794,10 +2854,11 @@
             return v;
         };
 
-        this.openFilter = function (key) {
+        this.openFilter = function (key, back) {
             var enabled = Lampa.Controller.enabled().name;
 
             if (key == 'search') return this.searchInput();
+            if (key == 'filter') return this.openFilterMenu();
 
             if (key == 'reset') {
                 object.filters = { search: '' };
@@ -2806,7 +2867,7 @@
                 return;
             }
 
-            if (key == 'genre' || key == 'theme' || key == 'demographic') return this.openGenres(key, enabled);
+            if (key == 'genre' || key == 'theme' || key == 'demographic') return this.openGenres(key, enabled, back);
 
             var items = [];
             var current = object.filters[key];
@@ -2846,19 +2907,23 @@
                 title: Lampa.Lang.translate('shikimori_chip_' + (key == 'order' ? 'order' : key)),
                 items: items,
                 onSelect: function (item) {
-                    Lampa.Controller.toggle(enabled);
                     object.filters[key] = item.value;
                     self.updateHead();
                     self.reload();
+                    if (back) back();
+                    else Lampa.Controller.toggle(enabled);
                 },
-                onBack: function () { Lampa.Controller.toggle(enabled); }
+                onBack: function () {
+                    if (back) back();
+                    else Lampa.Controller.toggle(enabled);
+                }
             });
         };
 
         // Жанры, темы и демография — мультивыбор: у Shikimori это один параметр,
         // различаются только идентификаторы. Мультивыбор сделан переоткрытием
         // списка: onCheck в этой сборке Lampa не вызывается, а onSelect есть всегда
-        this.openGenres = function (kind, enabled) {
+        this.openGenres = function (kind, enabled, back) {
             var chosen = String(object.filters[kind] || '').split(',').filter(function (v) { return v; });
             var items = [{ title: Lampa.Lang.translate('shikimori_any'), value: '', selected: !chosen.length }];
 
@@ -2890,15 +2955,17 @@
                     self.updateHead();
                     // Список открывается заново с обновлёнными галочками —
                     // так отмечают несколько значений подряд, не выходя наружу
-                    if (item.value) self.openGenres(kind, enabled);
+                    if (item.value) self.openGenres(kind, enabled, back);
                     else {
-                        Lampa.Controller.toggle(enabled);
                         self.reload();
+                        if (back) back();
+                        else Lampa.Controller.toggle(enabled);
                     }
                 },
                 onBack: function () {
-                    Lampa.Controller.toggle(enabled);
                     self.reload();
+                    if (back) back();
+                    else Lampa.Controller.toggle(enabled);
                 }
             });
         };
@@ -3539,6 +3606,9 @@
             shikimori_action_login: { ru: 'Войти по QR', en: 'Sign in with QR', uk: 'Увійти за QR' },
 
             shikimori_chip_search: { ru: 'Поиск', en: 'Search', uk: 'Пошук' },
+            shikimori_chip_filter: { ru: 'Фильтр', en: 'Filter', uk: 'Фільтр' },
+            shikimori_chip_reset_filters: { ru: 'Сбросить фильтры', en: 'Clear filters', uk: 'Скинути фільтри' },
+            shikimori_chip_reset_hint: { ru: 'Вернуть все условия к «любой»', en: 'Set every condition back to any', uk: 'Повернути всі умови до «будь-який»' },
             shikimori_chip_theme: { ru: 'Тема', en: 'Theme', uk: 'Тема' },
             shikimori_chip_demographic: { ru: 'Аудитория', en: 'Demographic', uk: 'Аудиторія' },
             shikimori_chip_duration: { ru: 'Длительность', en: 'Duration', uk: 'Тривалість' },
@@ -3641,6 +3711,12 @@
         '<rect x="13" y="3" width="8" height="8" rx="1.5" fill="currentColor"/>' +
         '<rect x="3" y="13" width="8" height="8" rx="1.5" fill="currentColor"/>' +
         '<rect x="13" y="13" width="8" height="8" rx="1.5" fill="currentColor"/></svg>';
+
+    var ICON_SORT = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M4 7H20M7 12H17M10 17H14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+
+    var ICON_FILTER = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M3 5H21L14 13V19L10 21V13L3 5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 
     var ICON_CALENDAR = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
         '<rect x="3" y="5" width="18" height="16" rx="2" stroke="currentColor" stroke-width="2"/>' +
