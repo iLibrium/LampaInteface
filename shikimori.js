@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '1.9.0';
+    var VERSION = '2.0.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -2909,6 +2909,10 @@
         this.buildHead = function () {
             filter = new Lampa.Filter({});
 
+            // Шапка живёт внутри прокрутки, поэтому уезжает вместе с карточками.
+            // Свой класс нужен, чтобы выровнять её по сетке и закрепить сверху
+            filter.render().addClass('shikimori-head');
+
             filter.onBack = function () {
                 self.start();
             };
@@ -3988,26 +3992,34 @@
             '.shikimori-card .card__type{background:#fff;color:#000}' +
             '.shikimori-card .card__new-episode>div{background-color:#5DBFF5;color:#06283A}' +
 
-            /* Раскладка по углам: 0.6em от края, пересечься не могут */
-            '.shikimori-card .shikimori-year{position:absolute;left:0.6em;top:0.6em}' +
-            '.shikimori-card .card__type{position:absolute;left:0.6em;top:2.85em;right:auto;bottom:auto}' +
-            '.shikimori-card--noyear .card__type{top:0.6em}' +
+            /* Раскладка по углам. ВАЖНО: смещения задаются на элементе, у которого
+               кегль 0.8em, поэтому в его единицах 0.6em карточки — это 0.75em.
+               Тот же пересчёт, что и у радиуса. Исключение — .card__new-episode:
+               кегль стоит на вложенном div, а смещения на самом контейнере */
+            '.shikimori-card .shikimori-year{position:absolute;left:0.75em;top:0.75em}' +
+            '.shikimori-card .card__type{position:absolute;left:0.75em;top:3.55em;right:auto;bottom:auto}' +
+            '.shikimori-card--noyear .card__type{top:0.75em}' +
             '.shikimori-card .card__new-episode{left:auto;right:0.6em;top:0.6em;bottom:auto;text-align:right}' +
-            '.shikimori-card .card__vote{right:0.6em;bottom:0.6em;left:auto;top:auto}' +
-            '.shikimori-card .card__marker{left:0.6em;bottom:0.6em;right:auto;top:auto}' +
+            '.shikimori-card .card__vote{right:0.75em;bottom:0.75em;left:auto;top:auto}' +
+            '.shikimori-card .card__marker{left:0.75em;bottom:0.75em;right:auto;top:auto}' +
             /* Точка перед маркером — индикатор категории закладок Lampa, у нас её нет */
             '.shikimori-card .card__marker:before{display:none}' +
             /* Штатный маркер режет текст на 5em, а «1175 серия · Amazing Dubbing» длиннее */
             '.shikimori-card .card__marker>span{font-size:1em;max-width:11em}' +
 
-            /* Полоса прогресса: та же геометрия, что у бейджей */
-            '.shikimori-progress{position:absolute;left:0.6em;right:0.6em;bottom:0.6em;height:0.3em;' +
-                'background:rgba(255,255,255,0.25);-webkit-border-radius:0.4em;border-radius:0.4em;' +
+            /* Прогресс вписан в нижнюю кромку постера, а не висит отдельной
+               плашкой: он свойство карточки, а не ещё один плавающий объект.
+               Раз это сама кромка, расстояния между ним и постером нет,
+               и по концентричности радиус равен радиусу постера — 1em снизу */
+            '.shikimori-progress{position:absolute;left:0;right:0;bottom:0;height:0.4em;' +
+                'background:rgba(0,0,0,0.5);' +
+                '-webkit-border-radius:0 0 1em 1em;border-radius:0 0 1em 1em;' +
                 'overflow:hidden;z-index:2}' +
             '.shikimori-progress i{display:block;height:100%;width:0;background:#5DBFF5}' +
-            /* Нижние бейджи уступают место полосе: 0.6 + 0.3 + 0.3 зазора */
+            /* Нижние бейджи поднимаются над кромкой: 0.4em полосы + 0.6em зазора
+               = 1em карточки, в единицах бейджа это 1.25em */
             '.shikimori-card--progress .card__vote,' +
-            '.shikimori-card--progress .card__marker{bottom:1.2em}' +
+            '.shikimori-card--progress .card__marker{bottom:1.25em}' +
 
             /* --- Варианты плотности --- */
             '.shikimori-card--compact{width:9.5em}' +
@@ -4040,6 +4052,15 @@
                 '-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
             '.shikimori-action__icon svg{display:block;width:100%;height:100%}' +
             '.shikimori-action__title{white-space:nowrap;background:none!important;padding:0!important}' +
+
+            /* --- Шапка каталога --- */
+            /* Кнопки стояли вплотную к краю, а карточки — с отступом сетки:
+               выравниваем по одной линии. Закрепление сверху не даёт шапке
+               уехать при прокрутке; где sticky нет, она просто прокрутится */
+            '.shikimori-head{padding-left:1em;padding-right:1em;' +
+                'position:-webkit-sticky;position:sticky;top:0;z-index:5;' +
+                'background:rgba(0,0,0,0.75)}' +
+            '.shikimori-head .simple-button{margin-bottom:0}' +
 
             /* --- Каталог: тот же шаг, что в строках, ширина от контейнера --- */
             '.shikimori-catalog{-webkit-box-pack:start!important;-webkit-justify-content:flex-start!important;' +
