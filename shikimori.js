@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '1.8.0';
+    var VERSION = '1.9.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -3943,7 +3943,15 @@
          *
          * Бейдж на постере — ОДИН набор метрик для всех четырёх углов.
          * Взят из чипов самой Lampa (.card__type, .card__quality):
-         *   кегль 0.8em · поля 0.4em 0.5em · радиус 0.3em · от угла s2
+         *   кегль 0.8em · поля 0.4em 0.5em · от угла s2
+         *
+         * Радиус вложенного элемента — не произвольный. Концентричность:
+         *   радиус внутреннего = радиус внешнего − расстояние между ними
+         * Постер скруглён на 1em, бейдж отстоит от угла на 0.6em, значит его
+         * радиус равен 0.4em КАРТОЧКИ. Бейдж набран 0.8em, поэтому в его
+         * собственных единицах это 0.5em. Раньше стояло 0.3em его кегля —
+         * то есть 0.24em карточки, вчетверо острее постера, и угол выглядел
+         * вырубленным. Меняешь отступ от угла — пересчитывай радиус.
          * Отличаются бейджи только цветом:
          *   нейтральный  rgba(0,0,0,.6) + #fff   — год, маркер, оценка
          *   выделенный   #fff + #000             — тип (редкий, потому громкий)
@@ -3951,7 +3959,8 @@
          * Рейтинг Lampa рисует пилюлей 1.3em/радиус 1em, но на нашей карточке
          * рядом три других бейджа, и разнобой заметнее, чем расхождение с Lampa.
          *
-         * Радиусы: 0.3em у всего прямоугольного, 100% у круглого. Третьего нет.
+         * Самостоятельные поверхности (кнопки, плитки недели, панель QR) ни во
+ * что не вложены — там радиус свой: кнопки берут его у Lampa.
          * ================================================================ */
 
         Lampa.Template.add('shikimori_style',
@@ -3969,7 +3978,7 @@
             '.shikimori-card .shikimori-year,' +
             '.shikimori-card .card__new-episode>div{' +
                 'font-size:0.8em;line-height:1.2;padding:0.4em 0.5em;' +
-                '-webkit-border-radius:0.3em;border-radius:0.3em;' +
+                '-webkit-border-radius:0.5em;border-radius:0.5em;' +
                 'font-weight:400;z-index:1}' +
 
             /* Цветовые роли */
@@ -3993,7 +4002,7 @@
 
             /* Полоса прогресса: та же геометрия, что у бейджей */
             '.shikimori-progress{position:absolute;left:0.6em;right:0.6em;bottom:0.6em;height:0.3em;' +
-                'background:rgba(255,255,255,0.25);-webkit-border-radius:0.3em;border-radius:0.3em;' +
+                'background:rgba(255,255,255,0.25);-webkit-border-radius:0.4em;border-radius:0.4em;' +
                 'overflow:hidden;z-index:2}' +
             '.shikimori-progress i{display:block;height:100%;width:0;background:#5DBFF5}' +
             /* Нижние бейджи уступают место полосе: 0.6 + 0.3 + 0.3 зазора */
@@ -4026,8 +4035,7 @@
             '.shikimori-action{margin-left:0;margin-right:0.8em;padding:0 1.2em;height:3.4em;' +
                 'display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;' +
                 '-webkit-box-align:center;-webkit-align-items:center;-ms-flex-align:center;align-items:center;' +
-                '-webkit-box-sizing:border-box;box-sizing:border-box;' +
-                '-webkit-border-radius:0.3em;border-radius:0.3em}' +
+                '-webkit-box-sizing:border-box;box-sizing:border-box}' +
             '.shikimori-action__icon{display:block;width:1.4em;height:1.4em;margin-right:0.6em;' +
                 '-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
             '.shikimori-action__icon svg{display:block;width:100%;height:100%}' +
@@ -4053,7 +4061,7 @@
             '.shikimori-week{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;' +
                 'display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;margin:0 0 1.5em 0}' +
             '.shikimori-week__day{-webkit-box-flex:1;-webkit-flex:1 1 0;-ms-flex:1 1 0;flex:1 1 0;text-align:center;' +
-                'padding:0.6em 0.3em;margin-right:0.6em;-webkit-border-radius:0.3em;border-radius:0.3em;' +
+                'padding:0.6em 0.3em;margin-right:0.6em;-webkit-border-radius:0.6em;border-radius:0.6em;' +
                 'background:rgba(255,255,255,0.08)}' +
             '.shikimori-week__day:last-child{margin-right:0}' +
             '.shikimori-week__day--today{background:rgba(255,255,255,0.18)}' +
@@ -4087,7 +4095,7 @@
             '.shikimori-auth{text-align:center;padding:1.5em 0}' +
             '.shikimori-auth__text{font-size:1.1em;margin:0.6em 0;opacity:0.9}' +
             '.shikimori-auth__qr{display:inline-block;background:#fff;padding:0.6em;' +
-                '-webkit-border-radius:0.3em;border-radius:0.3em;margin:0.6em 0}' +
+                '-webkit-border-radius:0.8em;border-radius:0.8em;margin:0.6em 0}' +
             '.shikimori-auth__qr img,.shikimori-auth__qr canvas,.shikimori-auth__qr svg{display:block;width:14em;height:14em}' +
             '.shikimori-auth__url{font-size:0.8em;opacity:0.55;word-break:break-all;margin:0.6em 2.25em}' +
 
