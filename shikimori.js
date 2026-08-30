@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '2.2.0';
+    var VERSION = '3.0.2';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -42,13 +42,12 @@
     var FAVORITES_WAIT = 2500;                // ждём синхронизацию закладок аккаунта, мс
     var BADGE_DELAY = 6000;                   // пересчёт счётчика в меню — после загрузки приложения
     var SEQUELS_MAX = 40;                     // сколько досмотренных тайтлов проверяем на продолжения
-    var OAUTH_REDIRECT = 'urn:ietf:wg:oauth:2.0:oob'; // код показывается на странице, сервер не нужен
     var FAV_TAGS = ['look', 'wath', 'book', 'viewed', 'thrown'];  // метки Lampa: Смотрю, Позже, Закладки, Просмотрено, Брошено
     var MARK_SEEN_LIMIT = 2000;               // потолок отметок за одно нажатие
     var MARK_SEEN_FALLBACK = 24;              // если число серий неизвестно
     var WATCHING_RECENT_DAYS = 30;            // сколько дней просмотр считается активным
+    var PROGRESS_SCAN_MAX = 400;              // потолок перебора серий при поиске отметок
     var FRESH_SANE_MAX = 26;                  // больше кура непросмотренного — значит нумерация разошлась
-    var SYNC_MAX = 20;                        // сколько записей прогресса отправляем за раз
 
     var manifest = {
         type: 'video',
@@ -247,22 +246,6 @@
         return this.req('POST', url, body, { 'Content-Type': 'application/json' }, ok, err);
     };
 
-    // OAuth Shikimori принимает только форму, не JSON
-    NetPool.prototype.postForm = function (url, params, ok, err) {
-        var body = [];
-        for (var key in params) {
-            body.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]));
-        }
-        return this.req('POST', url, body.join('&'), { 'Content-Type': 'application/x-www-form-urlencoded' }, ok, err);
-    };
-
-    // Запрос от имени пользователя
-    NetPool.prototype.authed = function (method, url, token, body, ok, err) {
-        var headers = { 'Authorization': 'Bearer ' + token };
-        if (body) headers['Content-Type'] = 'application/json';
-        return this.req(method, url, body, headers, ok, err);
-    };
-
     NetPool.prototype.clear = function () {
         for (var i = 0; i < this.list.length; i++) {
             try { this.list[i].abort(); } catch (e) {}
@@ -441,129 +424,6 @@
                 return img.indexOf('http') == 0 ? img : SHIKI_BASE + img;
             }
             return SHIKI_BASE + '/system/animes/original/' + (anime.id || '0') + '.jpg';
-        }
-    };
-
-    /* ============================================================
-     * Авторизация Shikimori (OAuth, поток для ТВ)
-     * ------------------------------------------------------------
-     * Ключи приложения не вшиты: их вписывают в настройки, потому что
-     * client_secret в публичном плагине не спрятать (PKCE у Shikimori нет).
-     * Поток «oob»: код показывается на странице, пользователь переносит его
-     * в приложение руками — колбэк-сервер для ТВ не нужен.
-     * Проверено живьём: и /oauth/token, и запись user_rates отдают CORS,
-     * а preflight пропускает Authorization.
-     * ============================================================ */
-
-    var Auth = {
-        clientId: function () {
-            return storString('shikimori_client_id', '');
-        },
-
-        clientSecret: function () {
-            return storString('shikimori_client_secret', '');
-        },
-
-        configured: function () {
-            return !!(this.clientId() && this.clientSecret());
-        },
-
-        data: function () {
-            var d = storGet('shikimori_oauth', {});
-            return d && typeof d == 'object' ? d : {};
-        },
-
-        save: function (d) {
-            storSet('shikimori_oauth', d);
-        },
-
-        connected: function () {
-            var d = this.data();
-            return !!(d.access_token && d.user_id);
-        },
-
-        nickname: function () {
-            return this.data().nickname || '';
-        },
-
-        logout: function () {
-            this.save({});
-        },
-
-        authorizeUrl: function () {
-            return SHIKI_BASE + '/oauth/authorize' +
-                '?client_id=' + encodeURIComponent(this.clientId()) +
-                '&redirect_uri=' + encodeURIComponent(OAUTH_REDIRECT) +
-                '&response_type=code&scope=user_rates';
-        },
-
-        // Код с сайта -> токены
-        exchange: function (net, code, ok, err) {
-            var self = this;
-            net.postForm(SHIKI_BASE + '/oauth/token', {
-                grant_type: 'authorization_code',
-                client_id: this.clientId(),
-                client_secret: this.clientSecret(),
-                code: code,
-                redirect_uri: OAUTH_REDIRECT
-            }, function (json) {
-                if (!json || !json.access_token) return err(json && json.error_description);
-                self.store(json);
-                self.identify(net, ok, err);
-            }, function () {
-                err('network');
-            });
-        },
-
-        // Токен живёт сутки, refresh при этом тоже меняется — сохраняем оба
-        refresh: function (net, ok, err) {
-            var self = this;
-            var d = this.data();
-            if (!d.refresh_token) return err('no_refresh');
-
-            net.postForm(SHIKI_BASE + '/oauth/token', {
-                grant_type: 'refresh_token',
-                client_id: this.clientId(),
-                client_secret: this.clientSecret(),
-                refresh_token: d.refresh_token
-            }, function (json) {
-                if (!json || !json.access_token) return err(json && json.error_description);
-                self.store(json);
-                ok(self.data().access_token);
-            }, function () {
-                err('network');
-            });
-        },
-
-        store: function (json) {
-            var d = this.data();
-            d.access_token = json.access_token;
-            d.refresh_token = json.refresh_token || d.refresh_token;
-            d.expires_at = Date.now() + ((json.expires_in || 86400) * 1000);
-            this.save(d);
-        },
-
-        identify: function (net, ok, err) {
-            var self = this;
-            var d = this.data();
-            net.authed('GET', SHIKI_BASE + '/api/users/whoami', d.access_token, null, function (user) {
-                // Без токена этот метод отвечает 200 и null — проверяем содержимое
-                if (!user || !user.id) return err('whoami');
-                d.user_id = user.id;
-                d.nickname = user.nickname || '';
-                self.save(d);
-                ok(d);
-            }, function () {
-                err('whoami');
-            });
-        },
-
-        // Отдаёт живой токен, обновляя его при необходимости
-        token: function (net, ok, err) {
-            var d = this.data();
-            if (!d.access_token) return err('no_token');
-            if (d.expires_at && Date.now() < d.expires_at - 60000) return ok(d.access_token);
-            this.refresh(net, ok, err);
         }
     };
 
@@ -849,305 +709,17 @@
     };
 
     /* ============================================================
-     * Отправка прогресса в Shikimori
-     * ============================================================ */
-
-    var Sync = {
-        enabled: function () {
-            return storBool('shikimori_sync', false) && Auth.connected();
-        },
-
-        // Прогресс двигаем только вперёд и не трогаем статусы с оценками:
-        // испортить чужой список плагин не должен даже при своей ошибке
-        push: function (net, tracked, rates, done) {
-            if (!this.enabled()) return done(0);
-
-            var mals = (rates && rates.mals) || {};
-            var queue = [];
-
-            for (var i = 0; i < tracked.length; i++) {
-                var item = tracked[i];
-                var sid = item.kodik && item.kodik.sid;
-                if (!sid || !item.watched) continue;
-
-                var rate = mals[sid];
-                var seen = rate ? (rate.episodes || 0) : 0;
-                if (item.watched <= seen) continue;
-
-                queue.push({ sid: sid, episodes: item.watched, rate: rate });
-            }
-
-            if (!queue.length) return done(0);
-            queue = queue.slice(0, SYNC_MAX);
-
-            Auth.token(net, function (token) {
-                var index = 0;
-                var sent = 0;
-
-                function next() {
-                    if (index >= queue.length) return done(sent);
-                    var job = queue[index++];
-                    var method, url, body;
-
-                    if (job.rate && job.rate.id) {
-                        method = 'PATCH';
-                        url = SHIKI_BASE + '/api/v2/user_rates/' + job.rate.id;
-                        body = { user_rate: { episodes: job.episodes } };
-                    }
-                    else {
-                        method = 'POST';
-                        url = SHIKI_BASE + '/api/v2/user_rates';
-                        body = {
-                            user_rate: {
-                                user_id: Auth.data().user_id,
-                                target_id: job.sid,
-                                target_type: 'Anime',
-                                episodes: job.episodes,
-                                status: 'watching'
-                            }
-                        };
-                    }
-
-                    net.authed(method, url, token, body, function () {
-                        sent++;
-                        next();
-                    }, next);
-                }
-
-                next();
-            }, function () {
-                done(0);
-            });
-        }
-    };
-
-    /* ============================================================
-     * Аккаунт Shikimori
+     * Ник Shikimori
      * ------------------------------------------------------------
-     * Почему на телевизоре нет входа по OAuth и не будет.
-     * Shikimori сделан на Doorkeeper: и client_secret, и код авторизации —
-     * строки порядка 43 символов. Device-flow (когда код показывают на ТВ,
-     * а подтверждают телефоном) Shikimori не поддерживает, своего сервера
-     * у плагина нет. Значит на телевизор в любом случае пришлось бы вносить
-     * длинную строку с пульта — этого мы делать не заставляем.
-     *
-     * Поэтому уровни разведены по устройствам:
-     *   телевизор — ник: читает публичные списки, вводится один раз, коротко
-     *   телефон   — полное подключение: там ввод и вставка работают нормально
-     * Прогресс, записанный с телефона, телевизор увидит через тот же ник.
-     * Плагин на телефоне появится сам: список плагинов ездит через аккаунт.
+     * Токенов и OAuth здесь нет намеренно. Записывать прогресс обратно
+     * в Shikimori смысла нет: он и так весь в Lampa, а подключение
+     * требовало двух строк по 43 символа, которые на телевизор не внести.
+     * Ник нужен только для чтения публичных списков: он даёт точное
+     * «просмотрено», которого нет в отметках Lampa, если смотрели не в ней.
      * ============================================================ */
 
     function accountScreen() {
-        var enabled = Lampa.Controller.enabled().name;
-        var nick = storString('shikimori_user', '');
-        var tv = currentTier() == 'tv';
-        var items = [];
-
-        items.push({
-            title: nick ? (Lampa.Lang.translate('shikimori_acc_change_nick') + ': ' + nick)
-                        : Lampa.Lang.translate('shikimori_acc_set_nick'),
-            subtitle: Lampa.Lang.translate('shikimori_acc_nick_hint'),
-            action: 'nick'
-        });
-
-        if (Auth.connected()) {
-            items.push({
-                title: Lampa.Lang.translate('shikimori_acc_logout'),
-                subtitle: Lampa.Lang.translate('shikimori_acc_connected_hint') + ' ' + (Auth.nickname() || nick),
-                action: 'logout'
-            });
-        }
-        else if (tv) {
-            // На телевизоре предлагать нечего, кроме объяснения — но объяснить
-            // надо, иначе выглядит как будто функции просто нет
-            items.push({
-                title: Lampa.Lang.translate('shikimori_acc_why'),
-                subtitle: Lampa.Lang.translate('shikimori_acc_why_hint'),
-                action: 'why'
-            });
-        }
-        else if (Auth.configured()) {
-            items.push({
-                title: Lampa.Lang.translate('shikimori_acc_signin'),
-                subtitle: Lampa.Lang.translate('shikimori_acc_signin_hint'),
-                action: 'signin'
-            });
-        }
-        else {
-            items.push({
-                title: Lampa.Lang.translate('shikimori_acc_keys'),
-                subtitle: Lampa.Lang.translate('shikimori_acc_keys_hint'),
-                action: 'keys'
-            });
-        }
-
-        Lampa.Select.show({
-            title: Lampa.Lang.translate('shikimori_acc_title'),
-            items: items,
-            onSelect: function (item) {
-                Lampa.Controller.toggle(enabled);
-                if (item.action == 'nick') askNickname();
-                if (item.action == 'why') explainOnPhone(enabled);
-                if (item.action == 'keys') askKeys(enabled);
-                if (item.action == 'signin') signInWithQr(enabled);
-                if (item.action == 'logout') {
-                    Auth.logout();
-                    Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_logged_out'));
-                }
-            },
-            onBack: function () { Lampa.Controller.toggle(enabled); }
-        });
-    }
-
-    // Телевизор: объясняем, почему тут этого нет и где делать
-    function explainOnPhone(enabled) {
-        var html = $('<div class="shikimori-auth">' +
-            '<div class="shikimori-auth__lead"></div>' +
-            '<ol class="shikimori-steps"></ol>' +
-        '</div>');
-
-        html.find('.shikimori-auth__lead').text(Lampa.Lang.translate('shikimori_why_lead'));
-
-        var steps = [
-            Lampa.Lang.translate('shikimori_why_1'),
-            Lampa.Lang.translate('shikimori_why_2'),
-            Lampa.Lang.translate('shikimori_why_3')
-        ];
-
-        for (var i = 0; i < steps.length; i++) {
-            var li = $('<li></li>');
-            li.text(steps[i]);
-            html.find('.shikimori-steps').append(li);
-        }
-
-        Lampa.Modal.open({
-            title: Lampa.Lang.translate('shikimori_why_title'),
-            html: html,
-            onBack: function () {
-                Lampa.Modal.close();
-                Lampa.Controller.toggle(enabled);
-            }
-        });
-    }
-
-    // Телефон и компьютер: ключи вставляются в поля, там это нормально
-    function askKeys(enabled) {
-        var apps = SHIKI_BASE + '/oauth/applications';
-
-        var html = $('<div class="shikimori-auth">' +
-            '<div class="shikimori-auth__lead"></div>' +
-            '<div class="shikimori-auth__qr"></div>' +
-            '<ol class="shikimori-steps"></ol>' +
-        '</div>');
-
-        html.find('.shikimori-auth__lead').text(Lampa.Lang.translate('shikimori_keys_lead'));
-
-        var steps = [
-            Lampa.Lang.translate('shikimori_keys_1') + ' ' + apps,
-            Lampa.Lang.translate('shikimori_keys_2'),
-            Lampa.Lang.translate('shikimori_keys_3')
-        ];
-
-        for (var i = 0; i < steps.length; i++) {
-            var li = $('<li></li>');
-            li.text(steps[i]);
-            html.find('.shikimori-steps').append(li);
-        }
-
-        try { Lampa.Utils.qrcode(apps, html.find('.shikimori-auth__qr')[0]); }
-        catch (e) { html.find('.shikimori-auth__qr').remove(); }
-
-        Lampa.Modal.open({
-            title: Lampa.Lang.translate('shikimori_keys_title'),
-            html: html,
-            onBack: function () {
-                Lampa.Modal.close();
-                Lampa.Controller.toggle(enabled);
-                askClientId(enabled);
-            }
-        });
-    }
-
-    function askClientId(enabled) {
-        Lampa.Input.edit({
-            title: Lampa.Lang.translate('shikimori_settings_client_id'),
-            value: storString('shikimori_client_id', ''),
-            free: true,
-            nosave: true
-        }, function (value) {
-            value = String(value || '').replace(/\s+/g, '');
-            if (!value) { Lampa.Controller.toggle(enabled); return; }
-            storSet('shikimori_client_id', value);
-            askClientSecret(enabled);
-        });
-    }
-
-    function askClientSecret(enabled) {
-        Lampa.Input.edit({
-            title: Lampa.Lang.translate('shikimori_settings_client_secret'),
-            value: storString('shikimori_client_secret', ''),
-            free: true,
-            nosave: true
-        }, function (value) {
-            value = String(value || '').replace(/\s+/g, '');
-            Lampa.Controller.toggle(enabled);
-            if (!value) return;
-            storSet('shikimori_client_secret', value);
-            Lampa.Noty.show(Lampa.Lang.translate('shikimori_keys_saved'));
-            signInWithQr(enabled);
-        });
-    }
-
-    // Ключи есть: QR на согласие, затем код с сайта
-    function signInWithQr(enabled) {
-        var url = Auth.authorizeUrl();
-
-        var html = $('<div class="shikimori-auth">' +
-            '<div class="shikimori-auth__lead"></div>' +
-            '<div class="shikimori-auth__qr"></div>' +
-            '<div class="shikimori-auth__url"></div>' +
-            '<div class="shikimori-auth__text"></div>' +
-        '</div>');
-
-        html.find('.shikimori-auth__lead').text(Lampa.Lang.translate('shikimori_signin_lead'));
-        html.find('.shikimori-auth__url').text(url);
-        html.find('.shikimori-auth__text').text(Lampa.Lang.translate('shikimori_signin_then'));
-
-        try { Lampa.Utils.qrcode(url, html.find('.shikimori-auth__qr')[0]); }
-        catch (e) { html.find('.shikimori-auth__qr').remove(); }
-
-        Lampa.Modal.open({
-            title: Lampa.Lang.translate('shikimori_signin_title'),
-            html: html,
-            onBack: function () {
-                Lampa.Modal.close();
-                Lampa.Controller.toggle(enabled);
-                askAuthCode(enabled);
-            }
-        });
-    }
-
-    function askAuthCode(enabled) {
-        Lampa.Input.edit({
-            title: Lampa.Lang.translate('shikimori_auth_code'),
-            value: '',
-            free: true,
-            nosave: true
-        }, function (code) {
-            Lampa.Controller.toggle(enabled);
-            code = String(code || '').replace(/\s+/g, '');
-            if (!code) return;
-
-            Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_checking'));
-            Auth.exchange(background_net, code, function (data) {
-                if (data.nickname) storSet('shikimori_user', data.nickname);
-                UserData.dropRatesCache();
-                Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_ok') + ' ' + (data.nickname || ''));
-            }, function (reason) {
-                Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_fail') + (reason ? ': ' + reason : ''));
-            });
-        });
+        askNickname();
     }
 
     // Адрес, по которому загружен сам плагин: в инструкции должен стоять
@@ -1338,6 +910,15 @@
 
                 if (item.action == 'seen_all') {
                     markSeen(data, 0, 0);
+                    // Отметок мало: если карточка пришла из закладок, ставим ещё
+                    // и метку «Просмотрено», иначе тайтл вернётся при следующей серии
+                    if (data._tmdb_card && data.id) {
+                        try {
+                            if (!Lampa.Favorite.check(data).viewed) Lampa.Favorite.add('viewed', data, 500);
+                        }
+                        catch (e) {}
+                    }
+                    if (data._card_el) data._card_el.style.display = 'none';
                     Lampa.Noty.show(Lampa.Lang.translate('shikimori_noty_seen'));
                 }
 
@@ -1416,52 +997,69 @@
      * ============================================================ */
 
     var Progress = {
-        // До какой серии досмотрено и когда. null — отметок нет
+        // До какой серии досмотрено и когда. null — отметок нет.
+        // Ключ отметки Lampa — hash(сезон + серия + оригинальное название), но
+        // разные балансеры пишут то original_name, то original_title, поэтому
+        // проверяем оба и берём максимум. Раньше перебор шёл только по сериям
+        // старше 24-й, и обычный случай «досмотрел 12 из 12» не находился вовсе
         lastWatched: function (card, max_ep) {
-            var name = card.original_name || card.original_title || '';
-            if (!name) return null;
+            var names = [];
+            if (card.original_name) names.push(card.original_name);
+            if (card.original_title && names.indexOf(card.original_title) < 0) names.push(card.original_title);
+            if (!names.length) return null;
 
             var episode = 0;
             var season = 1;
             var at = 0;
+            var i, n;
 
             // 1. Прямая запись «где остановился» от онлайн-балансеров
             try {
                 var last = Lampa.Storage.get('online_watched_last', {}) || {};
-                var filed = last[Lampa.Utils.hash(card.original_title || name)];
-                if (filed && filed.episode) {
-                    episode = parseInt(filed.episode, 10) || 0;
-                    season = parseInt(filed.season, 10) || 1;
+                for (n = 0; n < names.length; n++) {
+                    var filed = last[Lampa.Utils.hash(names[n])];
+                    if (filed && filed.episode) {
+                        var ep_num = parseInt(filed.episode, 10) || 0;
+                        if (ep_num > episode) {
+                            episode = ep_num;
+                            season = parseInt(filed.season, 10) || 1;
+                        }
+                    }
                 }
             }
             catch (e) {}
 
-            // 2. Отметки таймлайна — штатный обход серий первого сезона
+            // 2. Отметки таймлайна — штатный обход первого сезона
             try {
                 var marks = Lampa.Timeline.watched(card, true);
                 if (marks && marks.length) {
                     var top = marks[marks.length - 1];
                     if (top && top.ep > episode) { episode = top.ep; season = 1; }
-                    // Когда включали в последний раз — по самой свежей отметке
-                    for (var m = 0; m < marks.length; m++) {
-                        var upd = marks[m].view && marks[m].view.updated;
+                    for (i = 0; i < marks.length; i++) {
+                        var upd = marks[i].view && marks[i].view.updated;
                         if (upd > at) at = upd;
                     }
                 }
             }
             catch (e) {}
 
-            // 3. Timeline.watched обходит только серии 1..24 первого сезона.
-            // Если серий заведомо больше — досматриваем хвост точечно
-            if (max_ep > 24) {
+            // 3. Полный перебор до последней известной серии по обоим названиям.
+            // Идём сверху вниз и останавливаемся на первой найденной отметке
+            var limit = Math.min(max_ep || 0, PROGRESS_SCAN_MAX);
+            if (limit > episode) {
                 try {
-                    for (var ep = max_ep; ep > episode && ep > 24; ep--) {
-                        var view = Lampa.Timeline.watchedEpisode(card, season, ep, true);
-                        if (view && view.percent) {
-                            episode = ep;
-                            if (view.updated > at) at = view.updated;
-                            break;
+                    for (var ep = limit; ep > episode; ep--) {
+                        var found = false;
+                        for (n = 0; n < names.length && !found; n++) {
+                            var probe = { original_name: names[n], original_title: names[n] };
+                            var view = Lampa.Timeline.watchedEpisode(probe, season, ep, true);
+                            if (view && view.percent) {
+                                episode = ep;
+                                if (view.updated > at) at = view.updated;
+                                found = true;
+                            }
                         }
+                        if (found) break;
                     }
                 }
                 catch (e) {}
@@ -2089,8 +1687,10 @@
 
                         // Прогресса нет вовсе — сравнивать не с чем, и база первой
                         // встречи молчит до следующей серии. Но если озвучка вышла
-                        // на днях, это ровно та новость, ради которой тайтл в избранном
-                        airing = (!watched || !fresh) && best.info.at >= Date.now() - KODIK_FRESH_DAYS * 86400000;
+                        // на днях, это ровно та новость, ради которой тайтл в избранном.
+                        // Условие именно «прогресса нет»: раньше сюда попадало и
+                        // «нет непросмотренных», из-за чего досмотренное не уходило
+                        airing = !watched && best.info.at >= Date.now() - KODIK_FRESH_DAYS * 86400000;
                     }
 
                     var sids = [];
@@ -2412,7 +2012,7 @@
             if (data._watched_ep) {
                 marker.querySelector('span').innerText = data._total_ep > data._watched_ep
                     ? data._watched_ep + ' / ' + data._total_ep
-                    : data._watched_ep + ' ' + Lampa.Lang.translate('shikimori_ep');
+                    : Lampa.Lang.translate('shikimori_seen_all');
             }
             else if (data._kodik) {
                 var studio = data._kodik.studio ? ' · ' + data._kodik.studio : '';
@@ -2537,11 +2137,6 @@
                     lines.tracked = items;
                     join();
 
-                    // Прогресс, набранный в Lampa, уезжает в список Shikimori
-                    Sync.push(net, items, rates, function (sent) {
-                        if (sent) Lampa.Noty.show(Lampa.Lang.translate('shikimori_sync_done') + ': ' + sent);
-                    });
-
 
                     // Лента Kodik уже прогрета — общая строка идёт следом без запроса
                     UserData.released(net, function (cards) {
@@ -2616,8 +2211,7 @@
                 { action: 'catalog', icon: ICON_CATALOG, title: Lampa.Lang.translate('shikimori_action_catalog') },
                 { action: 'calendar', icon: ICON_CALENDAR, title: Lampa.Lang.translate('shikimori_action_calendar') },
                 { action: 'account', icon: ICON_USER,
-                  title: Auth.connected() ? (Auth.nickname() || nick)
-                       : (nick ? nick : Lampa.Lang.translate('shikimori_action_account')) }
+                  title: nick ? nick : Lampa.Lang.translate('shikimori_action_account') }
             ];
 
             data.push({
@@ -2859,9 +2453,13 @@
         return 's' + ((item.kodik && item.kodik.sid) || 0);
     }
 
-    // Скрытое «Не интересует» не показываем ни в одной личной строке
+    // Что не показываем в личных строках: убранное через «Не интересует»,
+    // а также помеченное в Lampa как просмотренное или брошенное — там решение
+    // уже принято, и новая серия ничего не меняет
     function visible(item) {
-        return !(item.kodik && Hidden.has(item.kodik.sid));
+        if (item.kodik && Hidden.has(item.kodik.sid)) return false;
+        if (item.groups && (item.groups.viewed || item.groups.thrown)) return false;
+        return true;
     }
 
     // Что реально смотрится: есть прогресс и есть непросмотренное. Тег этого
@@ -3688,62 +3286,6 @@
         Lampa.SettingsApi.addParam({
             component: 'shikimori',
             param: {
-                name: 'shikimori_client_id',
-                type: 'input',
-                values: '',
-                default: ''
-            },
-            field: {
-                name: Lampa.Lang.translate('shikimori_settings_client_id'),
-                description: Lampa.Lang.translate('shikimori_settings_client_id_descr')
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
-            param: {
-                name: 'shikimori_client_secret',
-                type: 'input',
-                values: '',
-                default: ''
-            },
-            field: {
-                name: Lampa.Lang.translate('shikimori_settings_client_secret'),
-                description: Lampa.Lang.translate('shikimori_settings_client_secret_descr')
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
-            param: {
-                name: 'shikimori_connect',
-                type: 'button'
-            },
-            field: {
-                name: Lampa.Lang.translate('shikimori_settings_connect'),
-                description: Lampa.Lang.translate('shikimori_settings_connect_descr')
-            },
-            onChange: function () {
-                accountScreen();
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
-            param: {
-                name: 'shikimori_sync',
-                type: 'trigger',
-                default: false
-            },
-            field: {
-                name: Lampa.Lang.translate('shikimori_settings_sync'),
-                description: Lampa.Lang.translate('shikimori_settings_sync_descr')
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
-            param: {
                 name: 'shikimori_card_style',
                 type: 'select',
                 values: {
@@ -4008,6 +3550,7 @@
             shikimori_style_poster: { ru: 'Крупные постеры', en: 'Large posters', uk: 'Великі постери' },
             shikimori_settings_uncensored: { ru: 'Показывать 18+', en: 'Show 18+', uk: 'Показувати 18+' },
             shikimori_settings_uncensored_descr: { ru: 'Отключает фильтр цензуры Shikimori', en: 'Disables Shikimori censorship filter', uk: 'Вимикає фільтр цензури Shikimori' },
+            shikimori_seen_all: { ru: 'Просмотрено', en: 'Watched', uk: 'Переглянуто' },
             shikimori_subtitles: { ru: 'субтитры', en: 'subtitles', uk: 'субтитри' },
             shikimori_dubbed: { ru: 'с озвучкой', en: 'dubbed', uk: 'з озвученням' },
             shikimori_settings_kodik: { ru: 'Строка «Новые серии»', en: 'New episodes row', uk: 'Рядок «Нові серії»' },
@@ -4016,57 +3559,13 @@
             shikimori_settings_kodik_subs_descr: { ru: 'Показывать серию новой, если вышла только с субтитрами, без озвучки', en: 'Treat subtitle-only releases as new episodes', uk: 'Показувати серію новою, якщо вийшла лише із субтитрами' },
             shikimori_settings_version: { ru: 'Версия плагина', en: 'Plugin version', uk: 'Версія плагіна' },
             shikimori_settings_version_descr: { ru: 'Обновляется при перезапуске Lampa. Если версия старая — закройте приложение полностью и откройте заново', en: 'Updates when Lampa restarts', uk: 'Оновлюється під час перезапуску Lampa' },
-            shikimori_settings_client_id: { ru: 'Client ID приложения Shikimori', en: 'Shikimori Client ID', uk: 'Client ID застосунку Shikimori' },
-            shikimori_settings_client_id_descr: { ru: 'Создаётся на shikimori.io/oauth/applications, Redirect URI — urn:ietf:wg:oauth:2.0:oob, права user_rates', en: 'Create at shikimori.io/oauth/applications', uk: 'Створюється на shikimori.io/oauth/applications' },
-            shikimori_settings_client_secret: { ru: 'Client Secret', en: 'Client Secret', uk: 'Client Secret' },
-            shikimori_settings_client_secret_descr: { ru: 'Хранится только на этом устройстве и никуда не отправляется, кроме самого Shikimori', en: 'Kept on this device only', uk: 'Зберігається лише на цьому пристрої' },
-            shikimori_settings_connect: { ru: 'Подключить Shikimori', en: 'Connect Shikimori', uk: 'Підключити Shikimori' },
-            shikimori_settings_connect_descr: { ru: 'Покажем QR-код: подтверждаете вход с телефона и вводите код с экрана', en: 'Scan a QR on your phone and type the code back', uk: 'Покажемо QR-код' },
-            shikimori_settings_sync: { ru: 'Отправлять прогресс в Shikimori', en: 'Push progress to Shikimori', uk: 'Надсилати прогрес у Shikimori' },
-            shikimori_settings_sync_descr: { ru: 'Просмотренное в Lampa проставляется в вашем списке. Прогресс только увеличивается, статусы и оценки не трогаются', en: 'What you watch in Lampa is written to your list; progress only moves forward', uk: 'Переглянуте в Lampa проставляється у вашому списку' },
             shikimori_action_account: { ru: 'Аккаунт Shikimori', en: 'Shikimori account', uk: 'Обліковий запис Shikimori' },
-
-            shikimori_acc_title: { ru: 'Аккаунт Shikimori', en: 'Shikimori account', uk: 'Обліковий запис Shikimori' },
-            shikimori_acc_set_nick: { ru: 'Указать ник', en: 'Set username', uk: 'Вказати нік' },
-            shikimori_acc_change_nick: { ru: 'Сменить ник', en: 'Change username', uk: 'Змінити нік' },
-            shikimori_acc_nick_hint: { ru: 'Показывает ваши списки и прогресс. Больше на телевизоре ничего не нужно', en: 'Shows your lists and progress. Nothing else is needed on a TV', uk: 'Показує ваші списки й прогрес' },
-            shikimori_acc_why: { ru: 'Запись прогресса — почему её тут нет', en: 'Writing progress — why it is not here', uk: 'Запис прогресу — чому його тут немає' },
-            shikimori_acc_why_hint: { ru: 'Настраивается в Lampa на телефоне, один раз', en: 'Set up in Lampa on your phone, once', uk: 'Налаштовується в Lampa на телефоні' },
-            shikimori_acc_keys: { ru: 'Подключить запись прогресса', en: 'Connect progress writing', uk: 'Підключити запис прогресу' },
-            shikimori_acc_keys_hint: { ru: 'Создать приложение Shikimori и вставить два ключа', en: 'Create a Shikimori application and paste two keys', uk: 'Створити застосунок Shikimori і вставити два ключі' },
-            shikimori_acc_signin: { ru: 'Войти по QR-коду', en: 'Sign in with QR', uk: 'Увійти за QR' },
-            shikimori_acc_signin_hint: { ru: 'Ключи уже сохранены — подтвердите вход', en: 'Keys are saved, confirm the sign-in', uk: 'Ключі вже збережено' },
-            shikimori_acc_connected_hint: { ru: 'Подключён:', en: 'Connected:', uk: 'Підключено:' },
-            shikimori_acc_logout: { ru: 'Отключить аккаунт', en: 'Disconnect account', uk: 'Відключити обліковий запис' },
-
-            shikimori_why_title: { ru: 'Запись прогресса в Shikimori', en: 'Writing progress to Shikimori', uk: 'Запис прогресу в Shikimori' },
-            shikimori_why_lead: { ru: 'На телевизоре этого нет намеренно. Shikimori требует ключ приложения и код авторизации — обе строки примерно по 43 символа, а способа подтвердить вход с телефона без ввода на телевизоре он не поддерживает. Заставлять набирать такое с пульта неправильно.', en: 'Deliberately absent on TV: Shikimori needs two 43-character strings and has no device flow.', uk: 'На телевізорі цього немає навмисно: Shikimori вимагає два довгі рядки й не має device-flow.' },
-            shikimori_why_1: { ru: 'Откройте Lampa на телефоне под тем же аккаунтом — плагин там появится сам, список плагинов синхронизируется.', en: 'Open Lampa on your phone under the same account; the plugin syncs there by itself.', uk: 'Відкрийте Lampa на телефоні під тим самим акаунтом.' },
-            shikimori_why_2: { ru: 'Там в разделе «Аниме» → «Аккаунт Shikimori» подключите запись прогресса: ввод и вставка на телефоне работают нормально.', en: 'There, connect progress writing — typing and pasting work fine on a phone.', uk: 'Там підключіть запис прогресу.' },
-            shikimori_why_3: { ru: 'Телевизору подключение не нужно: он видит ваш прогресс через ник, а записывает его телефон.', en: 'The TV needs no connection: it reads your progress by nickname while the phone writes it.', uk: 'Телевізору підключення не потрібне.' },
-
-            shikimori_keys_title: { ru: 'Приложение Shikimori', en: 'Shikimori application', uk: 'Застосунок Shikimori' },
-            shikimori_keys_lead: { ru: 'Нужно своё приложение Shikimori — плагин не хранит общих ключей. Создаётся один раз, дальше только вставить два значения.', en: 'You need your own Shikimori application; the plugin ships no shared keys.', uk: 'Потрібен власний застосунок Shikimori.' },
-            shikimori_keys_1: { ru: 'Откройте (QR выше):', en: 'Open (QR above):', uk: 'Відкрийте (QR вище):' },
-            shikimori_keys_2: { ru: 'Создайте приложение. Redirect URI: urn:ietf:wg:oauth:2.0:oob, права: user_rates', en: 'Create an application. Redirect URI: urn:ietf:wg:oauth:2.0:oob, scope: user_rates', uk: 'Створіть застосунок.' },
-            shikimori_keys_3: { ru: 'Нажмите «Назад» — плагин попросит вставить Client ID и Client Secret', en: 'Press Back and paste the Client ID and Client Secret', uk: 'Натисніть «Назад» і вставте ключі' },
-            shikimori_keys_saved: { ru: 'Ключи сохранены', en: 'Keys saved', uk: 'Ключі збережено' },
-
-            shikimori_signin_title: { ru: 'Вход в Shikimori', en: 'Sign in to Shikimori', uk: 'Вхід у Shikimori' },
-            shikimori_signin_lead: { ru: 'Отсканируйте код и подтвердите вход. Shikimori покажет код авторизации.', en: 'Scan and confirm. Shikimori will show an authorization code.', uk: 'Відскануйте код і підтвердьте вхід.' },
-            shikimori_signin_then: { ru: 'Затем нажмите «Назад» и вставьте этот код', en: 'Then press Back and paste that code', uk: 'Потім натисніть «Назад» і вставте цей код' },
 
             shikimori_nick_checking: { ru: 'Проверяем профиль…', en: 'Checking the profile…', uk: 'Перевіряємо профіль…' },
             shikimori_nick_ok: { ru: 'Нашли тайтлов:', en: 'Titles found:', uk: 'Знайдено тайтлів:' },
             shikimori_nick_watching: { ru: 'смотрю:', en: 'watching:', uk: 'дивлюсь:' },
             shikimori_nick_empty: { ru: 'Профиль найден, но списки пусты или закрыты в настройках приватности', en: 'Profile found, but the lists are empty or private', uk: 'Профіль знайдено, але списки порожні або закриті' },
             shikimori_nick_fail: { ru: 'Профиль не найден. Проверьте написание ника', en: 'Profile not found, check the spelling', uk: 'Профіль не знайдено' },
-
-            shikimori_auth_code: { ru: 'Код с сайта Shikimori', en: 'Code from Shikimori', uk: 'Код із сайту Shikimori' },
-            shikimori_auth_checking: { ru: 'Проверяем код…', en: 'Checking…', uk: 'Перевіряємо код…' },
-            shikimori_auth_ok: { ru: 'Подключено:', en: 'Connected:', uk: 'Підключено:' },
-            shikimori_auth_fail: { ru: 'Не получилось подключить', en: 'Connection failed', uk: 'Не вдалося підключити' },
-            shikimori_auth_logged_out: { ru: 'Аккаунт отключён', en: 'Disconnected', uk: 'Відключено' },
             shikimori_settings_studios: { ru: 'Студии озвучки', en: 'Dub studios', uk: 'Студії озвучення' },
             shikimori_settings_studios_descr: { ru: 'Считать серию вышедшей только когда её озвучили выбранные студии. Не выбрано — засчитывается любая озвучка', en: 'Count an episode as out only when your studios dubbed it', uk: 'Зараховувати серію лише від обраних студій' },
             shikimori_studios_any: { ru: 'Любая озвучка', en: 'Any studio', uk: 'Будь-яка озвучка' },
@@ -4373,9 +3872,11 @@
     // Либо мы знаем, сколько серий не просмотрено, либо просто знаем, что
     // озвучка вышла на днях — для избранного без прогресса это единственный сигнал
     function isFresh(item) {
+        // Досмотрено до конца доступного — новостей нет по определению
+        if (item.total && item.watched >= item.total) return false;
         if (!(item.fresh > 0) && !item.airing) return false;
         if (item.at < Date.now() - KODIK_FRESH_DAYS * 86400000) return false;
-        return !(item.kodik && Hidden.has(item.kodik.sid));
+        return visible(item);
     }
 
     function countFresh(items) {
@@ -4427,8 +3928,6 @@
             if (pair[0]) params[pair[0]] = decodeURIComponent(pair[1] || '');
         }
 
-        if (params.cid && !storString('shikimori_client_id', '')) storSet('shikimori_client_id', params.cid);
-        if (params.cs && !storString('shikimori_client_secret', '')) storSet('shikimori_client_secret', params.cs);
         if (params.nick && !storString('shikimori_user', '')) storSet('shikimori_user', params.nick);
     }
 
