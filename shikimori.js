@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '1.3.0';
+    var VERSION = '1.4.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -43,6 +43,11 @@
     var BADGE_DELAY = 6000;                   // пересчёт счётчика в меню — после загрузки приложения
     var SEQUELS_MAX = 40;                     // сколько досмотренных тайтлов проверяем на продолжения
     var OAUTH_REDIRECT = 'urn:ietf:wg:oauth:2.0:oob'; // код показывается на странице, сервер не нужен
+    var FAV_TAGS = ['look', 'wath', 'book', 'viewed', 'thrown'];  // метки Lampa: Смотрю, Позже, Закладки, Просмотрено, Брошено
+    var MARK_SEEN_LIMIT = 2000;               // потолок отметок за одно нажатие
+    var MARK_SEEN_FALLBACK = 24;              // если число серий неизвестно
+    var WATCHING_RECENT_DAYS = 30;            // сколько дней просмотр считается активным
+    var FRESH_SANE_MAX = 26;                  // больше кура непросмотренного — значит нумерация разошлась
     var SYNC_MAX = 20;                        // сколько записей прогресса отправляем за раз
 
     var manifest = {
@@ -353,33 +358,6 @@
                     for (var i = 0; i < list.length; i++) result.push(list[i]);
                     nextChunk();
                 }, err);
-            }
-
-            if (!ids.length) return ok([]);
-            nextChunk();
-        },
-
-        // Связанные тайтлы: нужны продолжения того, что уже досмотрено.
-        // Батчами по 10 — с вложенным related запрос тяжёлый по лимиту сложности
-        relatedByIds: function (net, ids, ok, err) {
-            var self = this;
-            var result = [];
-            var offset = 0;
-
-            function nextChunk() {
-                if (offset >= ids.length) return ok(result);
-                var part = ids.slice(offset, offset + 10);
-                offset += 10;
-                var q = '{ animes(ids: ' + JSON.stringify(part.join(',')) + ', limit: 10) { id related { relationRu anime { ' +
-                    'id malId name russian kind status episodes airedOn { year } poster { mainUrl } } } } }';
-                self.graphql(net, q, function (data) {
-                    var list = data.animes || [];
-                    for (var i = 0; i < list.length; i++) result.push(list[i]);
-                    nextChunk();
-                }, function () {
-                    // Часть пришла — работаем с тем, что есть
-                    ok(result);
-                });
             }
 
             if (!ids.length) return ok([]);
@@ -736,7 +714,9 @@
             function next() {
                 if (index >= limit) return ok(result);
                 var sid = ids[index++];
-                self.request(net, '/search', '&shikimori_id=' + sid + '&with_material_data=true', function (json) {
+                var params = '&shikimori_id=' + sid + '&with_material_data=true' +
+                    (self.withSubtitles() ? '' : '&translation_type=voice');
+                self.request(net, '/search', params, function (json) {
                     var merged = self.mergeRows(json.results || []);
                     for (var key in merged) result[key] = merged[key];
                     next();
@@ -761,9 +741,17 @@
                 if (!this.studioAllowed(studio)) continue;
 
                 var voice = !row.translation || row.translation.type != 'subtitles';
+                // Лента спрашивается с translation_type=voice, а точечный поиск раньше — нет,
+                // поэтому субтитровая раздача с большим числом серий выигрывала у озвучки
+                if (!voice && !this.withSubtitles()) continue;
+
                 var key = 's' + sid;
                 var prev = map[key];
-                if (prev && !(ep > prev.ep || (ep == prev.ep && voice && !prev.voice))) continue;
+                // Озвучка важнее субтитров всегда, число серий сравниваем только внутри типа
+                if (prev) {
+                    if (prev.voice && !voice) continue;
+                    if (!(voice && !prev.voice) && ep <= prev.ep) continue;
+                }
 
                 map[key] = {
                     sid: sid,
@@ -935,11 +923,28 @@
 
     // Подключение аккаунта: QR на экран, код вводится руками — колбэка на ТВ нет
     function connectShikimori() {
-        if (!Auth.configured()) {
-            return Lampa.Noty.show(Lampa.Lang.translate('shikimori_auth_need_keys'));
-        }
-
         var enabled = Lampa.Controller.enabled().name;
+
+        // Ключей нет — с пульта их не набрать, поэтому показываем QR на страницу
+        // регистрации приложения и оставляем ник как простой запасной путь
+        if (!Auth.configured()) {
+            return Lampa.Select.show({
+                title: Lampa.Lang.translate('shikimori_auth_need_keys'),
+                items: [
+                    { title: Lampa.Lang.translate('shikimori_auth_howto'), action: 'howto' },
+                    { title: Lampa.Lang.translate('shikimori_action_set_user'), action: 'nick' }
+                ],
+                onSelect: function (item) {
+                    Lampa.Controller.toggle(enabled);
+                    if (item.action == 'nick') return askNickname();
+                    showQr(SHIKI_BASE + '/oauth/applications',
+                        Lampa.Lang.translate('shikimori_auth_apps'),
+                        Lampa.Lang.translate('shikimori_auth_apps_hint'),
+                        enabled, null);
+                },
+                onBack: function () { Lampa.Controller.toggle(enabled); }
+            });
+        }
 
         if (Auth.connected()) {
             return Lampa.Select.show({
@@ -954,13 +959,22 @@
             });
         }
 
-        var url = Auth.authorizeUrl();
+        showQr(Auth.authorizeUrl(),
+            Lampa.Lang.translate('shikimori_auth_scan'),
+            Lampa.Lang.translate('shikimori_auth_then_code'),
+            enabled,
+            function () { askAuthCode(enabled); });
+    }
+
+    function showQr(url, head, hint, enabled, after) {
         var html = $('<div class="shikimori-auth">' +
-            '<div class="shikimori-auth__text">' + Lampa.Lang.translate('shikimori_auth_scan') + '</div>' +
+            '<div class="shikimori-auth__text">' + head + '</div>' +
             '<div class="shikimori-auth__qr"></div>' +
-            '<div class="shikimori-auth__url">' + url + '</div>' +
-            '<div class="shikimori-auth__text">' + Lampa.Lang.translate('shikimori_auth_then_code') + '</div>' +
+            '<div class="shikimori-auth__url"></div>' +
+            '<div class="shikimori-auth__text">' + hint + '</div>' +
         '</div>');
+
+        html.find('.shikimori-auth__url').text(url);
 
         // qrcode(text, element) рисует SVG внутрь узла и ничего не возвращает
         try { Lampa.Utils.qrcode(url, html.find('.shikimori-auth__qr')[0]); }
@@ -972,7 +986,7 @@
             onBack: function () {
                 Lampa.Modal.close();
                 Lampa.Controller.toggle(enabled);
-                askAuthCode(enabled);
+                if (after) after();
             }
         });
     }
@@ -1119,6 +1133,25 @@
             });
         }
 
+        items.push({ title: Lampa.Lang.translate('shikimori_menu_seen_all'), action: 'seen_all' });
+
+        // Метки Lampa прямо с карточки: тег ставится руками, и раньше ради него
+        // приходилось открывать полную карточку
+        var marked = {};
+        var taggable = !!(data._tmdb_card && data.id);
+        if (taggable) {
+            try { marked = Lampa.Favorite.check(data) || {}; } catch (e) { taggable = false; }
+        }
+
+        for (var t = 0; taggable && t < FAV_TAGS.length; t++) {
+            var tag = FAV_TAGS[t];
+            items.push({
+                title: (marked[tag] ? '✓ ' : '') + Lampa.Lang.translate('title_' + tag),
+                action: 'tag',
+                tag: tag
+            });
+        }
+
         items.push({ title: Lampa.Lang.translate('shikimori_menu_open'), action: 'open' });
 
         var enabled = Lampa.Controller.enabled().name;
@@ -1136,8 +1169,26 @@
                 }
 
                 if (item.action == 'seen') {
-                    markSeen(data);
+                    markSeen(data, data._total_ep, 1);
                     Lampa.Noty.show(Lampa.Lang.translate('shikimori_noty_seen'));
+                }
+
+                if (item.action == 'seen_all') {
+                    markSeen(data, 0, 0);
+                    Lampa.Noty.show(Lampa.Lang.translate('shikimori_noty_seen'));
+                }
+
+                if (item.action == 'tag') {
+                    var card = data;
+                    try {
+                        if (Lampa.Favorite.check(card)[item.tag]) Lampa.Favorite.remove(item.tag, card);
+                        else Lampa.Favorite.add(item.tag, card, 500);
+                        Lampa.Noty.show(Lampa.Lang.translate('title_' + item.tag) + ': ' +
+                            Lampa.Lang.translate(Lampa.Favorite.check(card)[item.tag] ? 'shikimori_tag_on' : 'shikimori_tag_off'));
+                    }
+                    catch (e) {
+                        Lampa.Noty.show(Lampa.Lang.translate('shikimori_tag_fail'));
+                    }
                 }
 
                 if (item.action == 'open') {
@@ -1151,19 +1202,27 @@
         });
     }
 
-    // Проставить отметки просмотра до последней доступной серии — для тех,
-    // кто досматривал не в Lampa, чтобы тайтл перестал числиться новым
-    function markSeen(data) {
+    // Проставить отметки просмотра — для тех, кто досматривал не в Lampa.
+    // episodes/seasons = 0 означает «всё, что знаем»: число сезонов и серий
+    // берём из карточки TMDB, потому что Kodik про сезоны ничего не говорит
+    function markSeen(data, episodes, seasons) {
         var name = data.original_name || data.original_title || '';
-        if (!name || !data._total_ep) return;
+        if (!name) return;
 
-        var season = 1;
-        for (var ep = 1; ep <= data._total_ep && ep <= 2000; ep++) {
-            try {
-                var hash = Lampa.Utils.hash([season, season > 10 ? ':' : '', ep, name].join(''));
-                Lampa.Timeline.update({ hash: hash, percent: 100, time: 0, duration: 0 });
+        var last_season = seasons || parseInt(data.number_of_seasons, 10) || 1;
+        var last_ep = episodes || parseInt(data.number_of_episodes, 10) || data._total_ep || 0;
+        if (!last_ep) last_ep = MARK_SEEN_FALLBACK;
+
+        var written = 0;
+        for (var season = 1; season <= last_season && written < MARK_SEEN_LIMIT; season++) {
+            for (var ep = 1; ep <= last_ep && written < MARK_SEEN_LIMIT; ep++) {
+                try {
+                    var hash = Lampa.Utils.hash([season, season > 10 ? ':' : '', ep, name].join(''));
+                    Lampa.Timeline.update({ hash: hash, percent: 100, time: 0, duration: 0 });
+                    written++;
+                }
+                catch (e) { return; }
             }
-            catch (e) { return; }
         }
     }
 
@@ -1846,32 +1905,45 @@
                         used['s' + seasons[j].mal] = true;
                     }
 
-                    var total = best ? best.info.ep : 0;
+                    // Озвучка не может опережать эфир: если Kodik насчитал больше,
+                    // чем вышло в Японии, верить надо меньшему числу
+                    var total = best ? countAvailable(best.info) : 0;
                     var mark = Progress.lastWatched(card, total);
                     var watched = mark ? mark.episode : 0;
                     var fresh = 0;
                     var airing = false;
 
                     if (best) {
-                        // Точный счёт возможен, только когда нумерация сезона Lampa
-                        // совпадает с нумерацией Shikimori. Иначе — от базы первой встречи
                         var aligned = !best.season || !mark || mark.season == best.season;
                         fresh = (watched && aligned) ? total - watched : total - (best.info.base || total);
+
+                        // Прогресс из отметок Lampa идёт в нумерации TMDB, а Kodik
+                        // считает серии подряд по всему тайтлу. У длинных сериалов
+                        // это расходится на сотни, поэтому неправдоподобной разнице
+                        // мы не верим и показываем тайтл без числа
+                        if (fresh > FRESH_SANE_MAX) fresh = 0;
+                        if (watched > total) fresh = 0;
 
                         // Прогресса нет вовсе — сравнивать не с чем, и база первой
                         // встречи молчит до следующей серии. Но если озвучка вышла
                         // на днях, это ровно та новость, ради которой тайтл в избранном
-                        airing = !watched && best.info.at >= Date.now() - KODIK_FRESH_DAYS * 86400000;
+                        airing = (!watched || !fresh) && best.info.at >= Date.now() - KODIK_FRESH_DAYS * 86400000;
                     }
 
                     var sids = [];
                     for (j = 0; j < seasons.length; j++) sids.push(seasons[j].mal);
+
+                    var fav_status = '';
+                    for (j = 0; j < sids.length; j++) {
+                        if (mals[sids[j]] && mals[sids[j]].status) fav_status = mals[sids[j]].status;
+                    }
 
                     items.push({
                         card: card,
                         tmdb: { id: card.id, method: card.name || card.original_name ? 'tv' : 'movie' },
                         groups: card._fav_groups || {},
                         sids: sids,
+                        status: fav_status,
                         kodik: best ? best.info : null,
                         total: total,
                         watched: watched,
@@ -1891,7 +1963,9 @@
                     var info = known['s' + sid];
                     var rate = mals[sid];
                     var seen = rate ? (rate.episodes || 0) : 0;
-                    var have = info ? info.ep : (anime.episodesAired || 0);
+                    var status = rate ? rate.status : '';
+                    var have = info ? countAvailable(info) : (anime.episodesAired || 0);
+                    if (anime.episodesAired && have > anime.episodesAired) have = anime.episodesAired;
 
                     // Списки Shikimori кормят «Новые серии», но в строки закладок
                     // не попадают: там строго то, что лежит в избранном Lampa
@@ -1899,6 +1973,7 @@
                         card: anime,
                         tmdb: null,
                         groups: {},
+                        status: status,
                         kodik: info || null,
                         total: have,
                         watched: seen,
@@ -1909,62 +1984,6 @@
 
                 ok(items);
             }
-        },
-
-        // Продолжения того, что вы уже досмотрели. Законченный тайтл выпадает
-        // из поля зрения вместе с сиквелом — списки эту дыру не закрывают
-        sequels: function (net, rates, tracked, ok) {
-            var mals = (rates && rates.mals) || {};
-            var done = [];
-            var seen = {};
-
-            function add(id) {
-                if (!id || seen['s' + id]) return;
-                seen['s' + id] = true;
-                done.push(id);
-            }
-
-            for (var mal in mals) {
-                if (mals[mal] && mals[mal].status == 'completed') add(parseInt(mal, 10));
-            }
-
-            // Без ника Shikimori источник один — закладки «Просмотрено» в Lampa
-            for (var i = 0; i < (tracked || []).length; i++) {
-                var item = tracked[i];
-                if (!item.groups || !item.groups.viewed) continue;
-                for (var j = 0; j < (item.sids || []).length; j++) add(item.sids[j]);
-            }
-
-            if (!done.length) return ok([]);
-            done = done.slice(0, SEQUELS_MAX);
-
-            Shiki.relatedByIds(net, done, function (list) {
-                var picked = [];
-                var seen = {};
-
-                for (var i = 0; i < list.length; i++) {
-                    var related = list[i].related || [];
-                    for (var j = 0; j < related.length; j++) {
-                        var rel = related[j];
-                        if (!rel || !rel.anime) continue;
-                        if (String(rel.relationRu).indexOf('Продолжение') < 0) continue;
-
-                        var anime = rel.anime;
-                        var sid = parseInt(anime.malId || anime.id, 10);
-                        // Уже в списках — значит про него знают; анонсы пропускаем,
-                        // здесь только то, что реально можно смотреть
-                        if (!sid || mals[sid] || seen['s' + sid]) continue;
-                        if (anime.status != 'released' && anime.status != 'ongoing') continue;
-
-                        seen['s' + sid] = true;
-                        picked.push(anime);
-                    }
-                }
-
-                ok(picked.slice(0, 20));
-            }, function () {
-                ok([]);
-            });
         },
 
         // Что вообще вышло с озвучкой за последние сутки — не только из закладок.
@@ -2325,7 +2344,7 @@
             this.activity.loader(true);
 
             var lines = {};
-            var join = makeJoin(6, function () {
+            var join = makeJoin(5, function () {
                 self.buildLines(lines);
             });
 
@@ -2349,11 +2368,6 @@
                         if (sent) Lampa.Noty.show(Lampa.Lang.translate('shikimori_sync_done') + ': ' + sent);
                     });
 
-                    // Продолжениям нужны id закладок — они появляются только здесь
-                    UserData.sequels(net, rates, items, function (cards) {
-                        lines.sequels = cards;
-                        join();
-                    });
 
                     // Лента Kodik уже прогрета — общая строка идёт следом без запроса
                     UserData.released(net, function (cards) {
@@ -2427,7 +2441,9 @@
                 { action: 'search', icon: ICON_SEARCH, title: Lampa.Lang.translate('shikimori_action_search') },
                 { action: 'catalog', icon: ICON_CATALOG, title: Lampa.Lang.translate('shikimori_action_catalog') },
                 { action: 'calendar', icon: ICON_CALENDAR, title: Lampa.Lang.translate('shikimori_action_calendar') },
-                { action: 'settings', icon: ICON_USER, title: nick ? nick : Lampa.Lang.translate('shikimori_action_set_user') }
+                Auth.connected()
+                    ? { action: 'account', icon: ICON_USER, title: Auth.nickname() || nick || Lampa.Lang.translate('shikimori_auth_connected') }
+                    : { action: 'login', icon: ICON_USER, title: Lampa.Lang.translate('shikimori_action_login') }
             ];
 
             data.push({
@@ -2487,11 +2503,28 @@
                 });
             }
 
-            // Есть продолжение — сиквелы того, что вы досмотрели
-            if (lines.sequels && lines.sequels.length) {
+            // Есть что посмотреть — всё остальное, где остались непросмотренные
+            // серии. «Я смотрю» уже забрала то, что вы ведёте; здесь то, что
+            // лежит в избранном под другими метками и ждёт своей очереди
+            var shown = {};
+            for (i = 0; i < watching.length; i++) shown[itemKey(watching[i])] = true;
+
+            var backlog = [];
+            for (i = 0; i < tracked.length; i++) {
+                var item = tracked[i];
+                if (!visible(item) || shown[itemKey(item)]) continue;
+                if (!(item.total > item.watched) && !item.airing) continue;
+                backlog.push(item);
+            }
+            backlog.sort(function (a, b) { return b.at - a.at; });
+            backlog = backlog.slice(0, 30);
+
+            if (backlog.length) {
+                var backlog_cards = [];
+                for (i = 0; i < backlog.length; i++) backlog_cards.push(UserData.decorate(backlog[i]));
                 data.push({
-                    title: Lampa.Lang.translate('shikimori_title_sequels'),
-                    results: lines.sequels,
+                    title: Lampa.Lang.translate('shikimori_title_backlog'),
+                    results: backlog_cards,
                     shiki: true,
                     line_type: 'shiki',
                     noimage: true,
@@ -2594,6 +2627,8 @@
                     if (card_data.action == 'catalog') openCatalog({});
                     if (card_data.action == 'calendar') openCatalog({ mode: 'calendar' });
                     if (card_data.action == 'settings') askNickname();
+                    if (card_data.action == 'login') connectShikimori();
+                    if (card_data.action == 'account') connectShikimori();
                 };
             }
         };
@@ -2605,6 +2640,19 @@
         return comp;
     }
 
+    // Сколько серий реально доступно: Kodik сообщает номер последней серии у
+    // студии, но у него бывает опережение, а больше, чем вышло в эфир, быть не может
+    function countAvailable(info) {
+        var ep = info.ep || 0;
+        if (info.aired && info.aired > 0 && ep > info.aired) return info.aired;
+        return ep;
+    }
+
+    function itemKey(item) {
+        if (item.tmdb && item.tmdb.id) return 't' + item.tmdb.id;
+        return 's' + ((item.kodik && item.kodik.sid) || 0);
+    }
+
     // Скрытое «Не интересует» не показываем ни в одной личной строке
     function visible(item) {
         return !(item.kodik && Hidden.has(item.kodik.sid));
@@ -2614,14 +2662,25 @@
     // не знает — его ставят один раз и не снимают, поэтому досмотренное
     // висит в «Смотрю» месяцами
     function watchingNow(tracked) {
+        var recent = Date.now() - WATCHING_RECENT_DAYS * 86400000;
         var picked = [];
+
         for (var i = 0; i < tracked.length; i++) {
             var item = tracked[i];
             if (item.groups && item.groups.look) continue;  // помеченные идут отдельно, выше
             if (!visible(item)) continue;
             if (!item.watched || item.total <= item.watched) continue;
+
+            // «Веду прямо сейчас» — это статус на Shikimori либо недавний просмотр
+            // в Lampa. Всё остальное с непросмотренными сериями — это отложенное,
+            // и ему место в отдельной строке, а не здесь
+            var active = item.status == 'watching' || item.status == 'rewatching' ||
+                (item.watched_at && item.watched_at >= recent);
+            if (!active) continue;
+
             picked.push(item);
         }
+
         picked.sort(function (a, b) { return b.watched_at - a.watched_at; });
         return picked;
     }
@@ -3646,7 +3705,7 @@
             shikimori_title_watching: { ru: 'Я смотрю', en: 'Watching', uk: 'Я дивлюсь' },
             shikimori_title_later: { ru: 'Позже', en: 'Later', uk: 'Пізніше' },
             shikimori_title_released: { ru: 'Свежая озвучка', en: 'Just dubbed', uk: 'Свіже озвучення' },
-            shikimori_title_sequels: { ru: 'Есть продолжение', en: 'Sequels are out', uk: 'Є продовження' },
+            shikimori_title_backlog: { ru: 'Есть что посмотреть', en: 'Ready to watch', uk: 'Є що подивитись' },
 
             shikimori_menu_hide: { ru: 'Не интересует', en: 'Not interested', uk: 'Не цікавить' },
             shikimori_menu_unhide: { ru: 'Показывать снова', en: 'Show again', uk: 'Показувати знову' },
@@ -3654,6 +3713,10 @@
             shikimori_settings_hidden_descr: { ru: 'Что вы убрали через «Не интересует». Выберите тайтл, чтобы вернуть его в строки', en: 'What you dismissed; pick a title to bring it back', uk: 'Що ви прибрали; оберіть тайтл, щоб повернути' },
             shikimori_hidden_empty: { ru: 'Ничего не скрыто', en: 'Nothing hidden', uk: 'Нічого не приховано' },
             shikimori_menu_seen: { ru: 'Отметить просмотренным до серии', en: 'Mark watched up to episode', uk: 'Позначити переглянутим до серії' },
+            shikimori_menu_seen_all: { ru: 'Отметить все серии просмотренными', en: 'Mark every episode watched', uk: 'Позначити всі серії переглянутими' },
+            shikimori_tag_on: { ru: 'метка поставлена', en: 'tagged', uk: 'мітку поставлено' },
+            shikimori_tag_off: { ru: 'метка снята', en: 'untagged', uk: 'мітку знято' },
+            shikimori_tag_fail: { ru: 'Не удалось изменить метку', en: 'Could not change the tag', uk: 'Не вдалося змінити мітку' },
             shikimori_menu_open: { ru: 'Открыть карточку', en: 'Open card', uk: 'Відкрити картку' },
             shikimori_noty_hidden: { ru: 'Убрали. Вернуть можно в настройках', en: 'Dismissed. Restore it in settings', uk: 'Прибрали. Повернути можна в налаштуваннях' },
             shikimori_noty_unhidden: { ru: 'Вернули в строки', en: 'Back in the rows', uk: 'Повернули' },
@@ -3670,6 +3733,7 @@
             shikimori_action_catalog: { ru: 'Каталог', en: 'Catalog', uk: 'Каталог' },
             shikimori_action_calendar: { ru: 'Календарь', en: 'Calendar', uk: 'Календар' },
             shikimori_action_set_user: { ru: 'Указать ник Shikimori', en: 'Set Shikimori username', uk: 'Вказати нік Shikimori' },
+            shikimori_action_login: { ru: 'Войти по QR', en: 'Sign in with QR', uk: 'Увійти за QR' },
 
             shikimori_chip_search: { ru: 'Поиск', en: 'Search', uk: 'Пошук' },
             shikimori_chip_genre: { ru: 'Жанр', en: 'Genre', uk: 'Жанр' },
@@ -3735,7 +3799,10 @@
             shikimori_auth_checking: { ru: 'Проверяем код…', en: 'Checking…', uk: 'Перевіряємо код…' },
             shikimori_auth_ok: { ru: 'Подключено:', en: 'Connected:', uk: 'Підключено:' },
             shikimori_auth_fail: { ru: 'Не получилось подключить', en: 'Connection failed', uk: 'Не вдалося підключити' },
-            shikimori_auth_need_keys: { ru: 'Сначала впишите Client ID и Client Secret', en: 'Fill in Client ID and Secret first', uk: 'Спочатку впишіть Client ID і Secret' },
+            shikimori_auth_need_keys: { ru: 'Аккаунт Shikimori не подключён', en: 'Shikimori account not connected', uk: 'Обліковий запис не підключено' },
+            shikimori_auth_howto: { ru: 'Как подключить аккаунт', en: 'How to connect', uk: 'Як підключити' },
+            shikimori_auth_apps: { ru: 'Создайте приложение на телефоне', en: 'Create an application on your phone', uk: 'Створіть застосунок на телефоні' },
+            shikimori_auth_apps_hint: { ru: 'Redirect URI: urn:ietf:wg:oauth:2.0:oob, права user_rates. Затем переустановите плагин по адресу с ?cid=…&cs=… — ключи подхватятся сами', en: 'Then reinstall the plugin with ?cid=...&cs=... in the URL', uk: 'Потім перевстановіть плагін з ?cid=…&cs=…' },
             shikimori_auth_connected: { ru: 'Аккаунт подключён', en: 'Account connected', uk: 'Обліковий запис підключено' },
             shikimori_auth_logout: { ru: 'Отключить аккаунт', en: 'Disconnect', uk: 'Відключити' },
             shikimori_auth_logged_out: { ru: 'Аккаунт отключён', en: 'Disconnected', uk: 'Відключено' },
@@ -3955,8 +4022,40 @@
         });
     }
 
+    // Ключи приложения можно передать прямо в адресе плагина:
+    // .../shikimori.js?cid=...&cs=... — иначе их пришлось бы набирать с пульта.
+    // Плагин ставится один раз на компьютере, а на телевизор приезжает
+    // синхронизацией аккаунта Lampa вместе с параметрами
+    function readSelfParams() {
+        var src = '';
+        try {
+            if (document.currentScript && document.currentScript.src) src = document.currentScript.src;
+            if (!src) {
+                var list = document.getElementsByTagName('script');
+                for (var i = list.length - 1; i >= 0; i--) {
+                    if (list[i].src && list[i].src.indexOf('shikimori') >= 0) { src = list[i].src; break; }
+                }
+            }
+        }
+        catch (e) {}
+        if (!src || src.indexOf('?') < 0) return;
+
+        var query = src.split('?')[1].split('#')[0].split('&');
+        var params = {};
+        for (var j = 0; j < query.length; j++) {
+            var pair = query[j].split('=');
+            if (pair[0]) params[pair[0]] = decodeURIComponent(pair[1] || '');
+        }
+
+        if (params.cid && !storString('shikimori_client_id', '')) storSet('shikimori_client_id', params.cid);
+        if (params.cs && !storString('shikimori_client_secret', '')) storSet('shikimori_client_secret', params.cs);
+        if (params.nick && !storString('shikimori_user', '')) storSet('shikimori_user', params.nick);
+    }
+
     function startPlugin() {
         Lampa.Manifest.plugins = manifest;
+
+        readSelfParams();
 
         setupLang();
         setupTemplates();
