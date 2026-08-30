@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '1.5.0';
+    var VERSION = '1.6.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -1119,21 +1119,21 @@
         var sid = data._kodik && data._kodik.sid;
         var items = [];
 
-        if (sid) {
-            items.push({
-                title: Lampa.Lang.translate(Hidden.has(sid) ? 'shikimori_menu_unhide' : 'shikimori_menu_hide'),
-                action: 'hide'
-            });
-        }
-
+        // Пункты подписаны по смыслу — иначе с пульта не понять,
+        // что меняет прогресс, что метку, а что видимость
         if (data._watched_ep < data._total_ep && data._total_ep) {
             items.push({
                 title: Lampa.Lang.translate('shikimori_menu_seen') + ' ' + data._total_ep,
+                subtitle: Lampa.Lang.translate('shikimori_group_progress'),
                 action: 'seen'
             });
         }
 
-        items.push({ title: Lampa.Lang.translate('shikimori_menu_seen_all'), action: 'seen_all' });
+        items.push({
+            title: Lampa.Lang.translate('shikimori_menu_seen_all'),
+            subtitle: Lampa.Lang.translate('shikimori_group_progress'),
+            action: 'seen_all'
+        });
 
         // Метки Lampa прямо с карточки: тег ставится руками, и раньше ради него
         // приходилось открывать полную карточку
@@ -1147,12 +1147,25 @@
             var tag = FAV_TAGS[t];
             items.push({
                 title: (marked[tag] ? '✓ ' : '') + Lampa.Lang.translate('title_' + tag),
+                subtitle: Lampa.Lang.translate('shikimori_group_tag'),
                 action: 'tag',
                 tag: tag
             });
         }
 
-        items.push({ title: Lampa.Lang.translate('shikimori_menu_open'), action: 'open' });
+        if (sid) {
+            items.push({
+                title: Lampa.Lang.translate(Hidden.has(sid) ? 'shikimori_menu_unhide' : 'shikimori_menu_hide'),
+                subtitle: Lampa.Lang.translate('shikimori_group_visible'),
+                action: 'hide'
+            });
+        }
+
+        items.push({
+            title: Lampa.Lang.translate('shikimori_menu_open'),
+            subtitle: Lampa.Lang.translate('shikimori_group_open'),
+            action: 'open'
+        });
 
         var enabled = Lampa.Controller.enabled().name;
 
@@ -2177,8 +2190,11 @@
             this.card = Lampa.Template.js('shikimori_card');
             this.card.classList.add('shikimori-card--' + style);
 
-            this.card.querySelector('.card__title').innerText = title;
-            this.card.querySelector('.card__age').innerText = year || '';
+            // Год в той же строке, что и название: отдельной строкой он отрывался
+            // от короткого названия на пустую строку, потому что блок заголовка
+            // приходится держать фиксированным ради выравнивания
+            this.card.querySelector('.card__title').innerText = year ? (title + ' · ' + year) : title;
+            this.card.querySelector('.card__age').innerText = '';
             this.card.querySelector('.card__promo-title').innerText = title;
 
             var img = this.card.querySelector('.card__img');
@@ -2609,6 +2625,7 @@
             }
 
             this.build(data);
+            watchScrollable();
         };
 
         // Перехват кликов по карточкам Shikimori и действиям
@@ -2646,6 +2663,37 @@
         var ep = info.ep || 0;
         if (info.aired && info.aired > 0 && ep > info.aired) return info.aired;
         return ep;
+    }
+
+    // Затемнение у края имеет смысл только там, где есть что прокручивать.
+    // Карточки догружаются асинхронно, поэтому проверяем не один раз
+    function markScrollable() {
+        var lines = document.querySelectorAll('.items-line--type-shiki');
+        for (var i = 0; i < lines.length; i++) {
+            var body = lines[i].querySelector('.items-line__body');
+            var track = lines[i].querySelector('.scroll__content') || lines[i].querySelector('.scroll__body');
+            if (!body || !track) continue;
+
+            if (track.scrollWidth > body.clientWidth + 4) lines[i].classList.add('shikimori-scrollable');
+            else lines[i].classList.remove('shikimori-scrollable');
+        }
+    }
+
+    var scroll_timer = null;
+
+    function watchScrollable() {
+        setTimeout(markScrollable, 300);
+        setTimeout(markScrollable, 1200);
+
+        // Лента дорисовывает карточки на ходу, поэтому ширина трека меняется
+        // уже после сборки экрана — пересчитываем при переходах фокуса
+        try {
+            document.addEventListener('hover:focus', function () {
+                clearTimeout(scroll_timer);
+                scroll_timer = setTimeout(markScrollable, 200);
+            }, true);
+        }
+        catch (e) {}
     }
 
     function itemKey(item) {
@@ -3707,6 +3755,10 @@
             shikimori_title_released: { ru: 'Свежая озвучка', en: 'Just dubbed', uk: 'Свіже озвучення' },
             shikimori_title_backlog: { ru: 'Есть что посмотреть', en: 'Ready to watch', uk: 'Є що подивитись' },
 
+            shikimori_group_progress: { ru: 'Прогресс просмотра', en: 'Watch progress', uk: 'Прогрес перегляду' },
+            shikimori_group_tag: { ru: 'Метка в избранном Lampa', en: 'Lampa bookmark tag', uk: 'Мітка в обраному Lampa' },
+            shikimori_group_visible: { ru: 'Видимость в строках плагина', en: 'Visibility in plugin rows', uk: 'Видимість у рядках плагіна' },
+            shikimori_group_open: { ru: 'Переход', en: 'Navigate', uk: 'Перехід' },
             shikimori_menu_hide: { ru: 'Не интересует', en: 'Not interested', uk: 'Не цікавить' },
             shikimori_menu_unhide: { ru: 'Показывать снова', en: 'Show again', uk: 'Показувати знову' },
             shikimori_settings_hidden: { ru: 'Скрытые тайтлы', en: 'Hidden titles', uk: 'Приховані тайтли' },
@@ -3768,7 +3820,7 @@
             shikimori_order_random: { ru: 'Случайно', en: 'Random', uk: 'Випадково' },
 
             shikimori_settings_user: { ru: 'Ник на Shikimori', en: 'Shikimori username', uk: 'Нік на Shikimori' },
-            shikimori_settings_user_descr: { ru: 'Списки профиля должны быть открытыми (настройки приватности Shikimori)', en: 'Profile lists must be public', uk: 'Списки профілю мають бути відкритими' },
+            shikimori_settings_user_descr: { ru: 'Даёт точный прогресс: сколько серий вы отметили в своём списке. Без ника прогресс берётся только из отметок Lampa. Списки профиля должны быть открыты в настройках приватности Shikimori', en: 'Gives exact progress from your public Shikimori lists', uk: 'Дає точний прогрес зі списків Shikimori' },
             shikimori_settings_style: { ru: 'Вид карточек', en: 'Card style', uk: 'Вигляд карток' },
             shikimori_settings_style_descr: { ru: 'Плотность сетки и оформление постеров', en: 'Grid density and poster look', uk: 'Щільність сітки та оформлення' },
             shikimori_style_native: { ru: 'Как в Lampa', en: 'Lampa native', uk: 'Як у Lampa' },
@@ -3886,6 +3938,19 @@
             // такой же, как в горизонтальных строках
             '.shikimori-catalog{-webkit-box-pack:start!important;-webkit-justify-content:flex-start!important;-ms-flex-pack:start!important;justify-content:flex-start!important}' +
             '.shikimori-catalog>.card{margin-right:1em;margin-bottom:1.5em}' +
+            // Ширина считается от контейнера, иначе справа оставалась пустая
+            // полоса: фиксированная карточка не знает, сколько её соседей влезло
+            '.shikimori-catalog>.card{width:-webkit-calc((100% - 5em) / 6);width:calc((100% - 5em) / 6)}' +
+            '.shikimori-catalog>.card:nth-child(6n){margin-right:0}' +
+            '.shiki-tier--tablet .shikimori-catalog>.card{width:-webkit-calc((100% - 3em) / 4);width:calc((100% - 3em) / 4)}' +
+            '.shiki-tier--tablet .shikimori-catalog>.card:nth-child(6n){margin-right:1em}' +
+            '.shiki-tier--tablet .shikimori-catalog>.card:nth-child(4n){margin-right:0}' +
+            '.shiki-tier--phone .shikimori-catalog>.card{width:-webkit-calc((100% - 1em) / 2);width:calc((100% - 1em) / 2)}' +
+            '.shiki-tier--phone .shikimori-catalog>.card:nth-child(6n){margin-right:1em}' +
+            '.shiki-tier--phone .shikimori-catalog>.card:nth-child(2n){margin-right:0}' +
+            '.shiki-tier--tv .shikimori-catalog>.card{width:-webkit-calc((100% - 4em) / 5);width:calc((100% - 4em) / 5)}' +
+            '.shiki-tier--tv .shikimori-catalog>.card:nth-child(6n){margin-right:1em}' +
+            '.shiki-tier--tv .shikimori-catalog>.card:nth-child(5n){margin-right:0}' +
             // окно подключения аккаунта
             '.shikimori-auth{text-align:center;padding:1em 0}' +
             '.shikimori-auth__text{font-size:1.1em;margin:0.6em 0;opacity:0.9}' +
@@ -3895,16 +3960,13 @@
             // Размерные тиры. Медиазапросы про телевизор ничего не знают,
             // поэтому класс ставится из JS по ширине экрана в em
             '.shiki-tier--phone .shikimori-catalog>.card,.shiki-tier--phone .items-line .card{margin-right:1em}' +
-            '.shiki-tier--phone .items-line--type-shiki .items-line__body:after{width:1.5em}' +
-            '.shiki-tier--tablet .items-line--type-shiki .items-line__body:after{width:2.25em}' +
-            '.shiki-tier--tv .items-line--type-shiki .items-line__body:after{width:3.4em}' +
             '.shiki-tier--tv .shikimori-action{height:3.4em;padding:0 1.5em}' +
             // На телефоне четыре бейджа на постере в 135px — это шум.
             // Оставляем только самый важный и полосу прогресса
             '.shiki-tier--phone .shikimori-card .card__vote,.shiki-tier--phone .shikimori-card .card__marker{display:none}' +
             '.shiki-tier--phone .shikimori-progress{height:0.4em}' +
             // счётчик новых серий на пункте меню
-            '.menu__item .shikimori-badge{margin-left:auto;background:#57F570;color:#17491C;font-size:0.8em;font-weight:700;min-width:1.7em;height:1.7em;line-height:1.7em;text-align:center;border-radius:1em;padding:0 0.4em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
+            '.menu__item .shikimori-badge{margin-left:auto;background:#5DBFF5;color:#06283A;font-size:0.8em;font-weight:700;min-width:1.7em;height:1.7em;line-height:1.7em;text-align:center;border-radius:1em;padding:0 0.4em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
             // неделя в шапке календаря
             '.shikimori-week{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;margin:0 0 1.5em 0}' +
             '.shikimori-week__day{-webkit-box-flex:1;-webkit-flex:1 1 0;-ms-flex:1 1 0;flex:1 1 0;text-align:center;padding:0.6em 0.3em;margin-right:0.6em;border-radius:0.3em;background:rgba(255,255,255,0.08)}' +
@@ -3913,7 +3975,7 @@
             '.shikimori-week__day--empty{opacity:0.4}' +
             '.shikimori-week__name{font-size:0.9em;opacity:0.7;text-transform:uppercase}' +
             '.shikimori-week__date{font-size:1.3em;line-height:1.3}' +
-            '.shikimori-week__count{font-size:1.1em;font-weight:700;color:#57F570}' +
+            '.shikimori-week__count{font-size:1.1em;font-weight:700;color:#5DBFF5}' +
             '.shikimori-week__day--empty .shikimori-week__count{color:inherit;font-weight:400}' +
             // заголовок дня в календаре — разрывает flex-строку
             '.shikimori-day{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;font-size:1.4em;margin:0.6em 0 0.6em 0;opacity:0.75}' +
@@ -3936,8 +3998,16 @@
             // Углы постера — четыре независимых слота: они не могут пересечься.
             // Штатный «+N» растянут во всю ширину по низу и налезает на маркер с рейтингом
             '.shikimori-card .card__new-episode{left:auto;right:0.6em;bottom:auto;top:0.6em;text-align:right}' +
+            // #57F570 — штатный цвет Lampa, но на постере он кислотный.
+            // Берём её же палитру маркеров: голубой «смотрю»
+            '.shikimori-card .card__new-episode>div{background-color:#5DBFF5;color:#06283A;padding:0.35em 0.7em;font-size:0.9em}' +
             '.shikimori-card .card__vote{right:0.6em;bottom:0.6em}' +
-            '.shikimori-card .card__marker{left:0.6em;bottom:0.6em}' +
+            '.shikimori-card .card__marker{left:0.6em;bottom:0.6em;padding-right:0.7em}' +
+            // Точка перед текстом — индикатор категории закладок Lampa;
+            // у нас там прогресс и студия, категории нет
+            '.shikimori-card .card__marker:before{display:none}' +
+            // Штатный маркер обрезает текст на 5em, а «1175 серия · Amazing Dubbing» длиннее
+            '.shikimori-card .card__marker>span{max-width:11em}' +
             // Блок заголовка ровно в две строки — фиксированной высоты, а не по
             // содержимому. Иначе год у соседних карточек стоит на разной высоте
             // и строка выглядит несобранной. Выровненность и «год вплотную»
@@ -3954,11 +4024,15 @@
             // параметров без нужного рычага. Затемнение у края даёт тот же сигнал
             // и не трогает геометрию
             '.items-line--type-shiki .items-line__body{position:relative}' +
-            '.items-line--type-shiki .items-line__body:after{content:"";position:absolute;top:0;bottom:0;right:0;width:2.25em;pointer-events:none;background:-webkit-linear-gradient(left,rgba(0,0,0,0),rgba(0,0,0,0.45));background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,0.45))}' +
+            // Затемнение включается только когда строка правда прокручивается,
+            // и заметно мягче: раньше оно висело на каждой строке, включая короткие
+            '.items-line--type-shiki.shikimori-scrollable .items-line__body:after{content:"";position:absolute;top:0;bottom:0;right:0;width:1.5em;pointer-events:none;background:-webkit-linear-gradient(left,rgba(0,0,0,0),rgba(0,0,0,0.28));background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,0.28))}' +
             // Прогресс просмотра
-            '.shikimori-progress{position:absolute;left:0;right:0;bottom:0;height:0.3em;background:rgba(0,0,0,0.55);border-radius:0 0 1em 1em;overflow:hidden;z-index:1}' +
-            '.shikimori-progress i{display:block;height:100%;width:0;background:#57F570}' +
-            '.shikimori-card--progress .card__vote,.shikimori-card--progress .card__marker{bottom:0.9em}' +
+            // Дорожка светлая: тёмная на тёмном постере не читалась, и заполнение
+            // выглядело случайной полоской в углу, а не прогрессом
+            '.shikimori-progress{position:absolute;left:0.6em;right:0.6em;bottom:0.6em;height:0.4em;background:rgba(255,255,255,0.25);-webkit-border-radius:0.4em;border-radius:0.4em;overflow:hidden;z-index:2}' +
+            '.shikimori-progress i{display:block;height:100%;width:0;background:#5DBFF5}' +
+            '.shikimori-card--progress .card__vote,.shikimori-card--progress .card__marker{bottom:1.4em}' +
             '.shikimori-card--compact{width:9.5em}' +
             '.shikimori-card--compact .card__title{font-size:1.05em;-webkit-line-clamp:1;line-clamp:1;max-height:1.4em;min-height:1.4em}' +
             '.shikimori-card--compact .card__age{display:none}' +
@@ -3973,7 +4047,7 @@
             '.shikimori-card--poster .card__marker{bottom:auto;top:0.6em;left:0.6em}' +
             // рейтинг Shikimori и строка следующей серии в полной карточке
             '.shikimori-rate{background:rgba(255,255,255,0.12)}' +
-            '.shikimori-next{margin-left:0.5em;color:#57F570}' +
+            '.shikimori-next{margin-left:0.5em;color:#5DBFF5}' +
             '</style>');
 
         $('body').append(Lampa.Template.get('shikimori_style', {}, true));
