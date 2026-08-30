@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '1.6.0';
+    var VERSION = '1.7.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -2190,11 +2190,19 @@
             this.card = Lampa.Template.js('shikimori_card');
             this.card.classList.add('shikimori-card--' + style);
 
-            // Год в той же строке, что и название: отдельной строкой он отрывался
-            // от короткого названия на пустую строку, потому что блок заголовка
-            // приходится держать фиксированным ради выравнивания
-            this.card.querySelector('.card__title').innerText = year ? (title + ' · ' + year) : title;
+            // Год ушёл на постер отдельным бейджем: строкой под названием он
+            // отрывался от коротких названий, а в самой строке названия съедал
+            // место у длинных
+            this.card.querySelector('.card__title').innerText = title;
             this.card.querySelector('.card__age').innerText = '';
+
+            var year_el = this.card.querySelector('.shikimori-year');
+            if (year) year_el.innerText = year;
+            else {
+                year_el.classList.add('hide');
+                // Без года тип поднимается в его слот, иначе повиснет в пустоте
+                this.card.classList.add('shikimori-card--noyear');
+            }
             this.card.querySelector('.card__promo-title').innerText = title;
 
             var img = this.card.querySelector('.card__img');
@@ -3908,6 +3916,7 @@
             '<div class="card selector layer--visible layer--render shikimori-card">' +
                 '<div class="card__view">' +
                     '<img src="./img/img_load.svg" class="card__img" />' +
+                    '<div class="shikimori-year"></div>' +
                     '<div class="card__type"></div>' +
                     '<div class="card__vote"></div>' +
                     '<div class="card__marker"><span></span></div>' +
@@ -3964,6 +3973,7 @@
             // На телефоне четыре бейджа на постере в 135px — это шум.
             // Оставляем только самый важный и полосу прогресса
             '.shiki-tier--phone .shikimori-card .card__vote,.shiki-tier--phone .shikimori-card .card__marker{display:none}' +
+            '.shiki-tier--phone .shikimori-year{font-size:0.95em}' +
             '.shiki-tier--phone .shikimori-progress{height:0.4em}' +
             // счётчик новых серий на пункте меню
             '.menu__item .shikimori-badge{margin-left:auto;background:#5DBFF5;color:#06283A;font-size:0.8em;font-weight:700;min-width:1.7em;height:1.7em;line-height:1.7em;text-align:center;border-radius:1em;padding:0 0.4em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
@@ -3998,6 +4008,14 @@
             // Углы постера — четыре независимых слота: они не могут пересечься.
             // Штатный «+N» растянут во всю ширину по низу и налезает на маркер с рейтингом
             '.shikimori-card .card__new-episode{left:auto;right:0.6em;bottom:auto;top:0.6em;text-align:right}' +
+            // Левый верх — стопка: год сверху, тип под ним. Год есть почти всегда,
+            // тип редко, поэтому громкая белая плашка Lampa достаётся именно типу,
+            // а год держится тише — тёмный чип, как у оценки и маркера
+            '.shikimori-year{position:absolute;left:0.6em;top:0.6em;z-index:1;font-size:0.8em;line-height:1.2;padding:0.3em 0.55em;background:rgba(0,0,0,0.78);color:rgba(255,255,255,0.92);-webkit-border-radius:0.3em;border-radius:0.3em;border:0.08em solid rgba(255,255,255,0.18)}' +
+            '.shikimori-card .card__type{left:0.6em;top:2.95em;right:auto;font-size:0.8em;padding:0.3em 0.55em;-webkit-border-radius:0.3em;border-radius:0.3em}' +
+            '.shikimori-card--noyear .card__type{top:0.6em}' +
+            // Строка года под названием больше не нужна — год на постере
+            '.shikimori-card .card__age{display:none}' +
             // #57F570 — штатный цвет Lampa, но на постере он кислотный.
             // Берём её же палитру маркеров: голубой «смотрю»
             '.shikimori-card .card__new-episode>div{background-color:#5DBFF5;color:#06283A;padding:0.35em 0.7em;font-size:0.9em}' +
@@ -4015,9 +4033,6 @@
             // цена — одна пустая строка у коротких названий. Три строки, как в
             // Lampa, брать нельзя — там цена уже две пустые
             '.shikimori-card .card__title{-webkit-line-clamp:2;line-clamp:2;height:2.4em}' +
-            // Год резервирует только свою строку — это не отрывает его от названия,
-            // но выравнивает карточки, у которых года нет
-            '.shikimori-card .card__age{min-height:1.2em}' +
             // Подсказка, что строка прокручивается. Штатную «выглядывающую»
             // карточку сделать нельзя: сколько карточек рисовать, Lampa решает
             // сама, а InteractionMain пробрасывает в строку фиксированный набор
