@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '3.0.2';
+    var VERSION = '3.1.1';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -291,6 +291,8 @@
             args.push('page: ' + (params.page || 1));
             if (params.order) args.push('order: ' + params.order); // enum, из белого списка
             if (params.kind) args.push('kind: ' + JSON.stringify(params.kind));
+            if (params.duration) args.push('duration: ' + JSON.stringify(params.duration));
+            if (params.rating) args.push('rating: ' + JSON.stringify(params.rating));
             if (params.status) args.push('status: ' + JSON.stringify(params.status));
             if (params.season) args.push('season: ' + JSON.stringify(params.season));
             if (params.genre) args.push('genre: ' + JSON.stringify(params.genre));
@@ -392,21 +394,32 @@
             }, err);
         },
 
-        genres: function (net, ok, err) {
+        // Жанры, темы и демография одним запросом. REST /api/genres отдаёт
+        // только жанры, темы там просто нет — а их у Shikimori больше полусотни
+        genresAll: function (net, ok, err) {
             var cached = storGet('shikimori_genres_cache', null);
-            if (cached && cached.time && Date.now() - cached.time < GENRES_TTL && cached.data && cached.data.length) {
-                return ok(cached.data);
+            if (cached && cached.time && Date.now() - cached.time < GENRES_TTL && cached.list && cached.list.length) {
+                return ok(cached.list);
             }
-            net.get(this.base() + '/api/genres', function (list) {
-                if (!list || !list.length) return err('genres');
-                var anime = [];
-                for (var i = 0; i < list.length; i++) {
-                    if (list[i].entry_type == 'Anime') anime.push({ id: list[i].id, title: list[i].russian || list[i].name });
+
+            this.graphql(net, '{ genres(entryType: Anime) { id name russian kind } }', function (data) {
+                var raw = data.genres || [];
+                var list = [];
+                for (var i = 0; i < raw.length; i++) {
+                    if (!raw[i] || !raw[i].id) continue;
+                    list.push({
+                        id: raw[i].id,
+                        kind: raw[i].kind,
+                        title: raw[i].russian || raw[i].name
+                    });
                 }
-                anime.sort(function (a, b) { return a.title < b.title ? -1 : 1; });
-                storSet('shikimori_genres_cache', { time: Date.now(), data: anime });
-                ok(anime);
-            }, err);
+                list.sort(function (a, b) { return a.title > b.title ? 1 : -1; });
+                storSet('shikimori_genres_cache', { time: Date.now(), list: list });
+                ok(list);
+            }, function () {
+                if (cached && cached.list) return ok(cached.list);
+                err('genres');
+            });
         },
 
         details: function (net, mal_id, ok, err) {
@@ -2614,6 +2627,9 @@
     var FILTER_KINDS = ['tv', 'movie', 'ova', 'ona', 'special', 'tv_special'];
     var FILTER_STATUSES = ['ongoing', 'anons', 'released'];
     var FILTER_ORDERS = ['popularity', 'ranked', 'aired_on', 'name', 'random'];
+    var FILTER_DURATIONS = ['S', 'D', 'F'];   // до 10 минут, до 30, свыше
+    var FILTER_RATINGS = ['g', 'pg', 'pg_13', 'r', 'r_plus'];
+    var FILTER_ORDERS = ['popularity', 'ranked', 'aired_on', 'name', 'random'];
     var FILTER_SCORES = [9, 8, 7, 6];
 
     function CatalogComponent(object) {
@@ -2623,8 +2639,8 @@
         var items = [];
         var html = document.createElement('div');
         var head = null;
-        var filter = null;
         var genres = [];
+        var head_el = null;
         var body = null;
         var last = null;
         var waitload = false;
@@ -2641,7 +2657,7 @@
             body = document.createElement('div');
             body.className = 'category-full shikimori-catalog';
 
-            if (object.mode == 'catalog' && Lampa.Filter) {
+            if (object.mode == 'catalog') {
                 head = this.buildHead();
                 scroll.append(head);
             }
@@ -2672,226 +2688,229 @@
 
         /* ---------- Шапка: штатный фильтр Lampa ---------- */
 
+        /* ---------- Шапка: та же строка кнопок, что на главной ---------- */
+
+        // Штатный Lampa.Filter рассчитан на торренты: его поиск ведёт в уточнение
+        // раздач, а набор полей фиксирован. Здесь своя строка кнопок — ровно те же
+        // .shikimori-action, что на главном экране, и каждая открывает свой список
         this.buildHead = function () {
-            filter = new Lampa.Filter({});
+            head_el = document.createElement('div');
+            head_el.className = 'shikimori-head';
 
-            // Шапка живёт внутри прокрутки, поэтому уезжает вместе с карточками.
-            // Свой класс нужен, чтобы выровнять её по сетке и закрепить сверху
-            filter.render().addClass('shikimori-head');
-
-            filter.onBack = function () {
-                self.start();
-            };
-
-            filter.onSelect = function (type, a, b) {
-                self.onFilterSelect(type, a, b);
-            };
-
-            // Штатная кнопка поиска ведёт в уточнение торрентов — перевешиваем на свой ввод
-            filter.render().find('.filter--search').off('hover:enter').on('hover:enter', function () {
-                self.searchInput();
-            });
-
-            // Жанры нужны для меню фильтра — подгружаем заранее
-            Shiki.genres(net, function (list) {
+            Shiki.genresAll(net, function (list) {
                 genres = list;
                 self.updateHead();
-            }, function () {});
+            }, function () {
+                self.updateHead();
+            });
 
             this.updateHead();
-
-            return filter.render()[0];
+            return head_el;
         };
 
-        this.enumItems = function (values, key, titleFn) {
-            var list = [{
-                title: Lampa.Lang.translate('shikimori_any'),
-                value: '',
-                selected: !object.filters[key]
-            }];
-            for (var i = 0; i < values.length; i++) {
-                list.push({
-                    title: titleFn(values[i]),
-                    value: values[i],
-                    selected: String(object.filters[key]) == String(values[i])
-                });
-            }
-            return list;
-        };
-
-        this.seasonValues = function () {
-            var values = [];
-            var i;
-            values.push(currentSeason(1));
-            for (i = 0; i > -8; i--) values.push(currentSeason(i));
-            var out = [];
-            for (i = 0; i < values.length; i++) out.push({ v: values[i], t: seasonTitle(values[i]) });
-            var year = new Date().getFullYear();
-            for (i = year - 2; i >= 2000; i--) out.push({ v: String(i), t: String(i) });
-            out.push({ v: '199x', t: '1990-е' });
-            out.push({ v: '198x', t: '1980-е' });
-            return out;
-        };
-
-        this.genreItems = function () {
-            var selected = object.filters.genre ? String(object.filters.genre).split(',') : [];
-            var list = [{
-                title: Lampa.Lang.translate('shikimori_any'),
-                value: '',
-                selected: !selected.length
-            }];
-            for (var i = 0; i < genres.length; i++) {
-                list.push({
-                    title: genres[i].title,
-                    value: String(genres[i].id),
-                    g_title: genres[i].title,
-                    selected: selected.indexOf(String(genres[i].id)) >= 0
-                });
-            }
-            return list;
-        };
-
-        // Текущее значение фильтра словами
-        this.filterLabel = function (key) {
+        this.filterButtons = function () {
             var f = object.filters;
-            if (key == 'genre') return f.genre_titles || '';
-            if (key == 'kind') return f.kind ? Lampa.Lang.translate('shikimori_kind_' + f.kind) : '';
-            if (key == 'status') return f.status ? Lampa.Lang.translate('shikimori_status_filter_' + f.status) : '';
-            if (key == 'season') return f.season ? seasonTitle(f.season) : '';
-            if (key == 'score') return f.score ? (Lampa.Lang.translate('shikimori_score_from') + ' ' + f.score) : '';
-            return '';
+            var list = [
+                { key: 'search', icon: ICON_SEARCH, title: Lampa.Lang.translate('shikimori_chip_search'), value: f.search },
+                { key: 'genre', title: Lampa.Lang.translate('shikimori_chip_genre'), value: this.genreLabel('genre') },
+                { key: 'theme', title: Lampa.Lang.translate('shikimori_chip_theme'), value: this.genreLabel('theme') },
+                { key: 'demographic', title: Lampa.Lang.translate('shikimori_chip_demographic'), value: this.genreLabel('demographic') },
+                { key: 'kind', title: Lampa.Lang.translate('shikimori_chip_kind'), value: this.enumLabel('kind', FILTER_KINDS, 'shikimori_kind_') },
+                { key: 'status', title: Lampa.Lang.translate('shikimori_chip_status'), value: this.enumLabel('status', FILTER_STATUSES, 'shikimori_status_filter_') },
+                { key: 'season', title: Lampa.Lang.translate('shikimori_chip_season'), value: this.seasonLabel() },
+                { key: 'score', title: Lampa.Lang.translate('shikimori_chip_score'), value: f.score ? (Lampa.Lang.translate('shikimori_score_from') + ' ' + f.score) : '' },
+                { key: 'duration', title: Lampa.Lang.translate('shikimori_chip_duration'), value: this.enumLabel('duration', FILTER_DURATIONS, 'shikimori_duration_') },
+                { key: 'rating', title: Lampa.Lang.translate('shikimori_chip_rating'), value: this.enumLabel('rating', FILTER_RATINGS, 'shikimori_rating_') },
+                { key: 'order', title: Lampa.Lang.translate('shikimori_chip_order'), value: f.order ? Lampa.Lang.translate('shikimori_order_' + f.order) : '' }
+            ];
+
+            for (var i = 0; i < list.length; i++) {
+                if (list[i].key != 'search' && list[i].value) {
+                    list.push({ key: 'reset', title: Lampa.Lang.translate('shikimori_chip_reset') });
+                    break;
+                }
+            }
+            if (object.filters.search) {
+                var has_reset = false;
+                for (i = 0; i < list.length; i++) if (list[i].key == 'reset') has_reset = true;
+                if (!has_reset) list.push({ key: 'reset', title: Lampa.Lang.translate('shikimori_chip_reset') });
+            }
+
+            return list;
         };
 
         this.updateHead = function () {
-            if (!filter) return;
+            if (!head_el) return;
 
-            var any = Lampa.Lang.translate('shikimori_any');
-            var seasons = this.seasonValues();
-            var season_values = [];
-            var i;
-            for (i = 0; i < seasons.length; i++) season_values.push(seasons[i].v);
+            head_el.innerHTML = '';
+            var buttons = this.filterButtons();
 
-            var groups = [
-                {
-                    key: 'genre',
-                    title: Lampa.Lang.translate('shikimori_chip_genre'),
-                    items: this.genreItems()
-                },
-                {
-                    key: 'kind',
-                    title: Lampa.Lang.translate('shikimori_chip_kind'),
-                    items: this.enumItems(FILTER_KINDS, 'kind', function (v) { return Lampa.Lang.translate('shikimori_kind_' + v); })
-                },
-                {
-                    key: 'status',
-                    title: Lampa.Lang.translate('shikimori_chip_status'),
-                    items: this.enumItems(FILTER_STATUSES, 'status', function (v) { return Lampa.Lang.translate('shikimori_status_filter_' + v); })
-                },
-                {
-                    key: 'season',
-                    title: Lampa.Lang.translate('shikimori_chip_season'),
-                    items: this.enumItems(season_values, 'season', function (v) {
-                        for (var j = 0; j < seasons.length; j++) if (seasons[j].v == v) return seasons[j].t;
-                        return v;
-                    })
-                },
-                {
-                    key: 'score',
-                    title: Lampa.Lang.translate('shikimori_chip_score'),
-                    items: this.enumItems(FILTER_SCORES, 'score', function (v) { return Lampa.Lang.translate('shikimori_score_from') + ' ' + v; })
-                }
-            ];
+            for (var i = 0; i < buttons.length; i++) {
+                (function (btn) {
+                    var el = Lampa.Template.js('shikimori_action');
+                    el.querySelector('.shikimori-action__icon').innerHTML = btn.icon || '';
+                    if (!btn.icon) el.querySelector('.shikimori-action__icon').style.display = 'none';
 
-            var filter_items = [];
-            var chosen = [];
-            for (i = 0; i < groups.length; i++) {
-                var label = this.filterLabel(groups[i].key);
-                filter_items.push({
-                    title: groups[i].title,
-                    subtitle: label || any,
-                    key: groups[i].key,
-                    noselect: true,
-                    items: groups[i].items
-                });
-                if (label) chosen.push(label);
+                    // Выбранное значение видно прямо на кнопке, как в родном фильтре
+                    el.querySelector('.shikimori-action__title').innerText = btn.value
+                        ? (btn.title + ': ' + btn.value)
+                        : btn.title;
+
+                    if (btn.value) el.classList.add('shikimori-action--active');
+
+                    el.addEventListener('hover:enter', function () {
+                        self.openFilter(btn.key);
+                    });
+
+                    head_el.appendChild(el);
+                })(buttons[i]);
             }
-            filter_items.push({
-                title: Lampa.Lang.translate('shikimori_chip_reset'),
-                reset: true,
-                noselect: true
-            });
-
-            var sort_items = [];
-            var order = object.filters.order || 'popularity';
-            for (i = 0; i < FILTER_ORDERS.length; i++) {
-                sort_items.push({
-                    title: Lampa.Lang.translate('shikimori_order_' + FILTER_ORDERS[i]),
-                    sort: FILTER_ORDERS[i],
-                    selected: FILTER_ORDERS[i] == order
-                });
-            }
-
-            filter.set('filter', filter_items);
-            filter.set('sort', sort_items);
-            filter.chosen('filter', chosen);
-            filter.chosen('sort', [Lampa.Lang.translate('shikimori_order_' + order)]);
-
-            var search_btn = filter.render().find('.filter--search');
-            if (object.filters.search) search_btn.find('div').text(Lampa.Utils.shortText(object.filters.search, 20)).removeClass('hide');
-            else search_btn.find('div').text('').addClass('hide');
         };
 
-        this.onFilterSelect = function (type, a, b) {
-            var f = object.filters;
+        this.genreLabel = function (kind) {
+            var chosen = String(object.filters[kind] || '').split(',');
+            var names = [];
+            for (var i = 0; i < genres.length; i++) {
+                if (genres[i].kind == kind && chosen.indexOf(String(genres[i].id)) >= 0) names.push(genres[i].title);
+            }
+            if (!names.length) return '';
+            return names.length > 2 ? (names.length + ' ' + Lampa.Lang.translate('shikimori_chosen')) : names.join(', ');
+        };
 
-            if (type == 'sort') {
-                f.order = a.sort;
+        this.enumLabel = function (key, values, prefix) {
+            var v = object.filters[key];
+            if (!v) return '';
+            for (var i = 0; i < values.length; i++) {
+                if (values[i] == v) return Lampa.Lang.translate(prefix + v);
+            }
+            return v;
+        };
+
+        this.seasonLabel = function () {
+            var v = object.filters.season;
+            if (!v) return '';
+            var list = this.seasonValues();
+            for (var i = 0; i < list.length; i++) if (list[i].v == v) return list[i].t;
+            return v;
+        };
+
+        this.openFilter = function (key) {
+            var enabled = Lampa.Controller.enabled().name;
+
+            if (key == 'search') return this.searchInput();
+
+            if (key == 'reset') {
+                object.filters = { search: '' };
                 this.updateHead();
-                return this.reload();
+                this.reload();
+                return;
             }
 
-            if (a.reset) {
-                object.filters = { order: f.order };
-                this.updateHead();
-                return this.reload();
+            if (key == 'genre' || key == 'theme' || key == 'demographic') return this.openGenres(key, enabled);
+
+            var items = [];
+            var current = object.filters[key];
+            var i;
+
+            items.push({ title: Lampa.Lang.translate('shikimori_any'), value: '', selected: !current });
+
+            if (key == 'season') {
+                var list = this.seasonValues();
+                for (i = 0; i < list.length; i++) items.push({ title: list[i].t, value: list[i].v, selected: current == list[i].v });
             }
-
-            if (!b) return;
-
-            if (a.key == 'genre') {
-                if (!b.value) {
-                    delete f.genre;
-                    delete f.genre_titles;
-                }
-                else {
-                    var current = f.genre ? String(f.genre).split(',') : [];
-                    var titles = f.genre_titles ? f.genre_titles.split(', ') : [];
-                    var idx = current.indexOf(b.value);
-                    if (idx >= 0) {
-                        current.splice(idx, 1);
-                        titles.splice(idx, 1);
-                    }
-                    else {
-                        current.push(b.value);
-                        titles.push(b.g_title);
-                    }
-                    if (current.length) {
-                        f.genre = current.join(',');
-                        f.genre_titles = titles.join(', ');
-                    }
-                    else {
-                        delete f.genre;
-                        delete f.genre_titles;
-                    }
+            else if (key == 'score') {
+                for (i = 0; i < FILTER_SCORES.length; i++) {
+                    items.push({
+                        title: Lampa.Lang.translate('shikimori_score_from') + ' ' + FILTER_SCORES[i],
+                        value: FILTER_SCORES[i],
+                        selected: current == FILTER_SCORES[i]
+                    });
                 }
             }
             else {
-                if (b.value === '' || typeof b.value == 'undefined') delete f[a.key];
-                else f[a.key] = b.value;
+                var map = { kind: [FILTER_KINDS, 'shikimori_kind_'], status: [FILTER_STATUSES, 'shikimori_status_filter_'],
+                            duration: [FILTER_DURATIONS, 'shikimori_duration_'], rating: [FILTER_RATINGS, 'shikimori_rating_'],
+                            order: [FILTER_ORDERS, 'shikimori_order_'] };
+                var pair = map[key];
+                if (!pair) return;
+                for (i = 0; i < pair[0].length; i++) {
+                    items.push({
+                        title: Lampa.Lang.translate(pair[1] + pair[0][i]),
+                        value: pair[0][i],
+                        selected: current == pair[0][i]
+                    });
+                }
             }
 
-            this.updateHead();
-            this.reload();
+            Lampa.Select.show({
+                title: Lampa.Lang.translate('shikimori_chip_' + (key == 'order' ? 'order' : key)),
+                items: items,
+                onSelect: function (item) {
+                    Lampa.Controller.toggle(enabled);
+                    object.filters[key] = item.value;
+                    self.updateHead();
+                    self.reload();
+                },
+                onBack: function () { Lampa.Controller.toggle(enabled); }
+            });
+        };
+
+        // Жанры, темы и демография — мультивыбор: у Shikimori это один параметр,
+        // различаются только идентификаторы. Мультивыбор сделан переоткрытием
+        // списка: onCheck в этой сборке Lampa не вызывается, а onSelect есть всегда
+        this.openGenres = function (kind, enabled) {
+            var chosen = String(object.filters[kind] || '').split(',').filter(function (v) { return v; });
+            var items = [{ title: Lampa.Lang.translate('shikimori_any'), value: '', selected: !chosen.length }];
+
+            for (var i = 0; i < genres.length; i++) {
+                if (genres[i].kind != kind) continue;
+                var id = String(genres[i].id);
+                var on = chosen.indexOf(id) >= 0;
+                items.push({
+                    title: (on ? '✓ ' : '') + genres[i].title,
+                    value: id,
+                    selected: on
+                });
+            }
+
+            if (items.length < 2) return Lampa.Noty.show(Lampa.Lang.translate('shikimori_error_api'));
+
+            Lampa.Select.show({
+                title: Lampa.Lang.translate('shikimori_chip_' + kind),
+                items: items,
+                onSelect: function (item) {
+                    if (!item.value) object.filters[kind] = '';
+                    else {
+                        var list = String(object.filters[kind] || '').split(',').filter(function (v) { return v; });
+                        var at = list.indexOf(item.value);
+                        if (at >= 0) list.splice(at, 1);
+                        else list.push(item.value);
+                        object.filters[kind] = list.join(',');
+                    }
+                    self.updateHead();
+                    // Список открывается заново с обновлёнными галочками —
+                    // так отмечают несколько значений подряд, не выходя наружу
+                    if (item.value) self.openGenres(kind, enabled);
+                    else {
+                        Lampa.Controller.toggle(enabled);
+                        self.reload();
+                    }
+                },
+                onBack: function () {
+                    Lampa.Controller.toggle(enabled);
+                    self.reload();
+                }
+            });
+        };
+
+        this.seasonValues = function () {
+            var list = [];
+            for (var i = 0; i < 8; i++) list.push({ v: currentSeason(-i), t: seasonTitle(currentSeason(-i)) });
+            var year = new Date().getFullYear();
+            for (i = 0; i < 6; i++) list.push({ v: String(year - i), t: String(year - i) });
+            list.push({ v: '1990_1999', t: '1990-е' });
+            list.push({ v: '1980_1989', t: '1980-е' });
+            return list;
         };
 
         this.searchInput = function () {
@@ -2912,14 +2931,25 @@
 
         this.requestParams = function () {
             var f = object.filters;
+
+            // У Shikimori жанры, темы и демография — один параметр genre,
+            // различаются только идентификаторы. Собираем их вместе
+            var ids = [];
+            var kinds = ['genre', 'theme', 'demographic'];
+            for (var i = 0; i < kinds.length; i++) {
+                if (f[kinds[i]]) ids.push(f[kinds[i]]);
+            }
+
             var params = {
                 page: object.page,
                 limit: 36,
                 kind: f.kind,
                 status: f.status,
                 season: f.season,
-                genre: f.genre,
+                genre: ids.join(','),
                 score: f.score,
+                duration: f.duration,
+                rating: f.rating,
                 search: f.search
             };
             if (f.order) params.order = f.order;
@@ -3158,8 +3188,7 @@
             net.clear();
             for (var i = 0; i < items.length; i++) items[i].destroy();
             items = [];
-            if (filter) filter.destroy();
-            filter = null;
+            head_el = null;
             scroll.destroy();
             html.remove();
         };
@@ -3510,6 +3539,19 @@
             shikimori_action_login: { ru: 'Войти по QR', en: 'Sign in with QR', uk: 'Увійти за QR' },
 
             shikimori_chip_search: { ru: 'Поиск', en: 'Search', uk: 'Пошук' },
+            shikimori_chip_theme: { ru: 'Тема', en: 'Theme', uk: 'Тема' },
+            shikimori_chip_demographic: { ru: 'Аудитория', en: 'Demographic', uk: 'Аудиторія' },
+            shikimori_chip_duration: { ru: 'Длительность', en: 'Duration', uk: 'Тривалість' },
+            shikimori_chip_rating: { ru: 'Возраст', en: 'Rating', uk: 'Вік' },
+            shikimori_chosen: { ru: 'выбрано', en: 'selected', uk: 'обрано' },
+            shikimori_duration_S: { ru: 'До 10 минут', en: 'Under 10 min', uk: 'До 10 хвилин' },
+            shikimori_duration_D: { ru: 'До 30 минут', en: 'Under 30 min', uk: 'До 30 хвилин' },
+            shikimori_duration_F: { ru: 'Более 30 минут', en: 'Over 30 min', uk: 'Понад 30 хвилин' },
+            shikimori_rating_g: { ru: 'G — без ограничений', en: 'G', uk: 'G' },
+            shikimori_rating_pg: { ru: 'PG — детям', en: 'PG', uk: 'PG' },
+            shikimori_rating_pg_13: { ru: 'PG-13 — с 13 лет', en: 'PG-13', uk: 'PG-13' },
+            shikimori_rating_r: { ru: 'R — с 17 лет', en: 'R', uk: 'R' },
+            shikimori_rating_r_plus: { ru: 'R+ — откровенное', en: 'R+', uk: 'R+' },
             shikimori_chip_genre: { ru: 'Жанр', en: 'Genre', uk: 'Жанр' },
             shikimori_chip_kind: { ru: 'Тип', en: 'Type', uk: 'Тип' },
             shikimori_chip_status: { ru: 'Статус', en: 'Status', uk: 'Статус' },
