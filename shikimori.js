@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '1.7.0';
+    var VERSION = '1.8.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -3934,22 +3934,110 @@
                 '<span class="shikimori-action__title"></span>' +
             '</div>');
 
+        /* ================================================================
+         * ПРАВИЛА ВЁРСТКИ
+         * ----------------------------------------------------------------
+         * Шкала отступов, от неё выводится всё:
+         *   s1 0.3em · s2 0.6em · s3 1em · s4 1.5em · s5 2.25em · s6 3.4em
+         * Значение вне шкалы допустимо только как производное и подписывается.
+         *
+         * Бейдж на постере — ОДИН набор метрик для всех четырёх углов.
+         * Взят из чипов самой Lampa (.card__type, .card__quality):
+         *   кегль 0.8em · поля 0.4em 0.5em · радиус 0.3em · от угла s2
+         * Отличаются бейджи только цветом:
+         *   нейтральный  rgba(0,0,0,.6) + #fff   — год, маркер, оценка
+         *   выделенный   #fff + #000             — тип (редкий, потому громкий)
+         *   акцентный    #5DBFF5 + #06283A       — новые серии
+         * Рейтинг Lampa рисует пилюлей 1.3em/радиус 1em, но на нашей карточке
+         * рядом три других бейджа, и разнобой заметнее, чем расхождение с Lampa.
+         *
+         * Радиусы: 0.3em у всего прямоугольного, 100% у круглого. Третьего нет.
+         * ================================================================ */
+
         Lampa.Template.add('shikimori_style',
             '<style>' +
-            /* Шкала отступов, из неё выведено всё остальное:
-               s1 0.3em · s2 0.6em · s3 1em · s4 1.5em · s5 2.25em · s6 3.4em
-               Значения вне шкалы допустимы только как производные:
-               0.9em = s2+s1 (бейдж над полосой прогресса) */
 
-            // Сетка каталога. space-between раздавал остаток ширины между
-            // карточками, поэтому в каждом ряду зазоры были разные, а последний
-            // неполный ряд растягивался во всю ширину. Фиксированный шаг ровно
-            // такой же, как в горизонтальных строках
-            '.shikimori-catalog{-webkit-box-pack:start!important;-webkit-justify-content:flex-start!important;-ms-flex-pack:start!important;justify-content:flex-start!important}' +
-            '.shikimori-catalog>.card{margin-right:1em;margin-bottom:1.5em}' +
-            // Ширина считается от контейнера, иначе справа оставалась пустая
-            // полоса: фиксированная карточка не знает, сколько её соседей влезло
-            '.shikimori-catalog>.card{width:-webkit-calc((100% - 5em) / 6);width:calc((100% - 5em) / 6)}' +
+            /* --- Карточка: базовый вид --- */
+            '.shikimori-card--native .card__promo{display:none}' +
+            '.shikimori-card .card__title{-webkit-line-clamp:2;line-clamp:2;height:2.4em}' +
+            '.shikimori-card .card__age{display:none}' +
+
+            /* --- Бейджи: единая геометрия для всех четырёх углов --- */
+            '.shikimori-card .card__vote,' +
+            '.shikimori-card .card__type,' +
+            '.shikimori-card .card__marker,' +
+            '.shikimori-card .shikimori-year,' +
+            '.shikimori-card .card__new-episode>div{' +
+                'font-size:0.8em;line-height:1.2;padding:0.4em 0.5em;' +
+                '-webkit-border-radius:0.3em;border-radius:0.3em;' +
+                'font-weight:400;z-index:1}' +
+
+            /* Цветовые роли */
+            '.shikimori-card .card__vote,' +
+            '.shikimori-card .card__marker,' +
+            '.shikimori-card .shikimori-year{background:rgba(0,0,0,0.6);color:#fff}' +
+            '.shikimori-card .card__type{background:#fff;color:#000}' +
+            '.shikimori-card .card__new-episode>div{background-color:#5DBFF5;color:#06283A}' +
+
+            /* Раскладка по углам: 0.6em от края, пересечься не могут */
+            '.shikimori-card .shikimori-year{position:absolute;left:0.6em;top:0.6em}' +
+            '.shikimori-card .card__type{position:absolute;left:0.6em;top:2.85em;right:auto;bottom:auto}' +
+            '.shikimori-card--noyear .card__type{top:0.6em}' +
+            '.shikimori-card .card__new-episode{left:auto;right:0.6em;top:0.6em;bottom:auto;text-align:right}' +
+            '.shikimori-card .card__vote{right:0.6em;bottom:0.6em;left:auto;top:auto}' +
+            '.shikimori-card .card__marker{left:0.6em;bottom:0.6em;right:auto;top:auto}' +
+            /* Точка перед маркером — индикатор категории закладок Lampa, у нас её нет */
+            '.shikimori-card .card__marker:before{display:none}' +
+            /* Штатный маркер режет текст на 5em, а «1175 серия · Amazing Dubbing» длиннее */
+            '.shikimori-card .card__marker>span{font-size:1em;max-width:11em}' +
+
+            /* Полоса прогресса: та же геометрия, что у бейджей */
+            '.shikimori-progress{position:absolute;left:0.6em;right:0.6em;bottom:0.6em;height:0.3em;' +
+                'background:rgba(255,255,255,0.25);-webkit-border-radius:0.3em;border-radius:0.3em;' +
+                'overflow:hidden;z-index:2}' +
+            '.shikimori-progress i{display:block;height:100%;width:0;background:#5DBFF5}' +
+            /* Нижние бейджи уступают место полосе: 0.6 + 0.3 + 0.3 зазора */
+            '.shikimori-card--progress .card__vote,' +
+            '.shikimori-card--progress .card__marker{bottom:1.2em}' +
+
+            /* --- Варианты плотности --- */
+            '.shikimori-card--compact{width:9.5em}' +
+            '.shikimori-card--compact .card__title{font-size:1.05em;-webkit-line-clamp:1;line-clamp:1;height:1.4em}' +
+            '.shikimori-card--poster{width:15em}' +
+            '.shikimori-card--poster .card__title{display:none}' +
+            '.shikimori-card--poster .card__view{margin-bottom:0}' +
+            '.shikimori-card--poster .card__promo{padding:2em 0.8em 0.8em 0.8em}' +
+            '.shikimori-card--poster .card__promo-title{font-size:1.2em}' +
+
+            /* --- Ритм строк: один набор правил на все строки плагина --- */
+            '.items-line--type-shiki{padding-top:0;padding-bottom:1.5em}' +
+            '.items-line--type-shiki .items-line__head{margin-bottom:0.6em}' +
+            '.items-line--type-shiki .items-line__body{position:relative;margin:0}' +
+            /* Затемнение только там, где действительно есть прокрутка */
+            '.items-line--type-shiki.shikimori-scrollable .items-line__body:after{content:"";position:absolute;' +
+                'top:0;bottom:0;right:0;width:1.5em;pointer-events:none;' +
+                'background:-webkit-linear-gradient(left,rgba(0,0,0,0),rgba(0,0,0,0.28));' +
+                'background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,0.28))}' +
+
+            /* --- Строка кнопок: тот же ритм, что у строк с карточками --- */
+            '.items-line--type-actions{padding-top:0;padding-bottom:1.5em}' +
+            '.items-line--type-actions .items-line__head{display:none}' +
+            '.items-line--type-actions .items-line__body{margin:0}' +
+            '.shikimori-action{margin-left:0;margin-right:0.8em;padding:0 1.2em;height:3.4em;' +
+                'display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;' +
+                '-webkit-box-align:center;-webkit-align-items:center;-ms-flex-align:center;align-items:center;' +
+                '-webkit-box-sizing:border-box;box-sizing:border-box;' +
+                '-webkit-border-radius:0.3em;border-radius:0.3em}' +
+            '.shikimori-action__icon{display:block;width:1.4em;height:1.4em;margin-right:0.6em;' +
+                '-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
+            '.shikimori-action__icon svg{display:block;width:100%;height:100%}' +
+            '.shikimori-action__title{white-space:nowrap;background:none!important;padding:0!important}' +
+
+            /* --- Каталог: тот же шаг, что в строках, ширина от контейнера --- */
+            '.shikimori-catalog{-webkit-box-pack:start!important;-webkit-justify-content:flex-start!important;' +
+                '-ms-flex-pack:start!important;justify-content:flex-start!important}' +
+            '.shikimori-catalog>.card{margin-right:1em;margin-bottom:1.5em;' +
+                'width:-webkit-calc((100% - 5em) / 6);width:calc((100% - 5em) / 6)}' +
             '.shikimori-catalog>.card:nth-child(6n){margin-right:0}' +
             '.shiki-tier--tablet .shikimori-catalog>.card{width:-webkit-calc((100% - 3em) / 4);width:calc((100% - 3em) / 4)}' +
             '.shiki-tier--tablet .shikimori-catalog>.card:nth-child(6n){margin-right:1em}' +
@@ -3960,26 +4048,13 @@
             '.shiki-tier--tv .shikimori-catalog>.card{width:-webkit-calc((100% - 4em) / 5);width:calc((100% - 4em) / 5)}' +
             '.shiki-tier--tv .shikimori-catalog>.card:nth-child(6n){margin-right:1em}' +
             '.shiki-tier--tv .shikimori-catalog>.card:nth-child(5n){margin-right:0}' +
-            // окно подключения аккаунта
-            '.shikimori-auth{text-align:center;padding:1em 0}' +
-            '.shikimori-auth__text{font-size:1.1em;margin:0.6em 0;opacity:0.9}' +
-            '.shikimori-auth__qr{display:inline-block;background:#fff;padding:0.8em;border-radius:0.5em;margin:0.8em 0}' +
-            '.shikimori-auth__qr img,.shikimori-auth__qr canvas,.shikimori-auth__qr svg{display:block;width:14em;height:14em}' +
-            '.shikimori-auth__url{font-size:0.8em;opacity:0.55;word-break:break-all;margin:0.6em 2em}' +
-            // Размерные тиры. Медиазапросы про телевизор ничего не знают,
-            // поэтому класс ставится из JS по ширине экрана в em
-            '.shiki-tier--phone .shikimori-catalog>.card,.shiki-tier--phone .items-line .card{margin-right:1em}' +
-            '.shiki-tier--tv .shikimori-action{height:3.4em;padding:0 1.5em}' +
-            // На телефоне четыре бейджа на постере в 135px — это шум.
-            // Оставляем только самый важный и полосу прогресса
-            '.shiki-tier--phone .shikimori-card .card__vote,.shiki-tier--phone .shikimori-card .card__marker{display:none}' +
-            '.shiki-tier--phone .shikimori-year{font-size:0.95em}' +
-            '.shiki-tier--phone .shikimori-progress{height:0.4em}' +
-            // счётчик новых серий на пункте меню
-            '.menu__item .shikimori-badge{margin-left:auto;background:#5DBFF5;color:#06283A;font-size:0.8em;font-weight:700;min-width:1.7em;height:1.7em;line-height:1.7em;text-align:center;border-radius:1em;padding:0 0.4em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
-            // неделя в шапке календаря
-            '.shikimori-week{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;margin:0 0 1.5em 0}' +
-            '.shikimori-week__day{-webkit-box-flex:1;-webkit-flex:1 1 0;-ms-flex:1 1 0;flex:1 1 0;text-align:center;padding:0.6em 0.3em;margin-right:0.6em;border-radius:0.3em;background:rgba(255,255,255,0.08)}' +
+
+            /* --- Календарь --- */
+            '.shikimori-week{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;' +
+                'display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;margin:0 0 1.5em 0}' +
+            '.shikimori-week__day{-webkit-box-flex:1;-webkit-flex:1 1 0;-ms-flex:1 1 0;flex:1 1 0;text-align:center;' +
+                'padding:0.6em 0.3em;margin-right:0.6em;-webkit-border-radius:0.3em;border-radius:0.3em;' +
+                'background:rgba(255,255,255,0.08)}' +
             '.shikimori-week__day:last-child{margin-right:0}' +
             '.shikimori-week__day--today{background:rgba(255,255,255,0.18)}' +
             '.shikimori-week__day--empty{opacity:0.4}' +
@@ -3987,82 +4062,38 @@
             '.shikimori-week__date{font-size:1.3em;line-height:1.3}' +
             '.shikimori-week__count{font-size:1.1em;font-weight:700;color:#5DBFF5}' +
             '.shikimori-week__day--empty .shikimori-week__count{color:inherit;font-weight:400}' +
-            // заголовок дня в календаре — разрывает flex-строку
-            '.shikimori-day{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;font-size:1.4em;margin:0.6em 0 0.6em 0;opacity:0.75}' +
-            // строка кнопок вместо ряда «Меню»
-            '.items-line--type-actions .items-line__title{display:none}' +
-            '.items-line--type-actions .items-line__head{display:none}' +
-            '.items-line--type-actions .items-line__body{margin:0}' +
-            '.items-line--type-actions{padding-top:0;padding-bottom:0}' +
-            // Lampa вешает на элементы строки отступ с обеих сторон, поэтому зазор
-            // между кнопками выходил вдвое больше, чем между карточками. Левый снимаем,
-            // правый считаем от собственного кегля кнопки (1.3em): 0.8em ≈ 1em обычного текста
-            '.shikimori-action{margin-left:0;margin-right:0.8em;padding:0 1.2em;height:3.4em;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-ms-flex-align:center;align-items:center;-webkit-box-sizing:border-box;box-sizing:border-box;-webkit-border-radius:0.3em;border-radius:0.3em}' +
-            '.shikimori-action__icon{display:block;width:1.4em;height:1.4em;margin-right:0.6em;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
-            '.shikimori-action__icon svg{display:block;width:100%;height:100%}' +
-            '.shikimori-action__title{white-space:nowrap;background:none!important;padding:0!important}' +
-            // Вид по умолчанию — ровно штатная карточка Lampa: размеры не трогаем,
-            // чтобы строки плагина и строки приложения совпадали.
-            // .card__promo — элемент самого плагина, он нужен только крупным постерам
-            '.shikimori-card--native .card__promo{display:none}' +
-            // Углы постера — четыре независимых слота: они не могут пересечься.
-            // Штатный «+N» растянут во всю ширину по низу и налезает на маркер с рейтингом
-            '.shikimori-card .card__new-episode{left:auto;right:0.6em;bottom:auto;top:0.6em;text-align:right}' +
-            // Левый верх — стопка: год сверху, тип под ним. Год есть почти всегда,
-            // тип редко, поэтому громкая белая плашка Lampa достаётся именно типу,
-            // а год держится тише — тёмный чип, как у оценки и маркера
-            '.shikimori-year{position:absolute;left:0.6em;top:0.6em;z-index:1;font-size:0.8em;line-height:1.2;padding:0.3em 0.55em;background:rgba(0,0,0,0.78);color:rgba(255,255,255,0.92);-webkit-border-radius:0.3em;border-radius:0.3em;border:0.08em solid rgba(255,255,255,0.18)}' +
-            '.shikimori-card .card__type{left:0.6em;top:2.95em;right:auto;font-size:0.8em;padding:0.3em 0.55em;-webkit-border-radius:0.3em;border-radius:0.3em}' +
-            '.shikimori-card--noyear .card__type{top:0.6em}' +
-            // Строка года под названием больше не нужна — год на постере
-            '.shikimori-card .card__age{display:none}' +
-            // #57F570 — штатный цвет Lampa, но на постере он кислотный.
-            // Берём её же палитру маркеров: голубой «смотрю»
-            '.shikimori-card .card__new-episode>div{background-color:#5DBFF5;color:#06283A;padding:0.35em 0.7em;font-size:0.9em}' +
-            '.shikimori-card .card__vote{right:0.6em;bottom:0.6em}' +
-            '.shikimori-card .card__marker{left:0.6em;bottom:0.6em;padding-right:0.7em}' +
-            // Точка перед текстом — индикатор категории закладок Lampa;
-            // у нас там прогресс и студия, категории нет
-            '.shikimori-card .card__marker:before{display:none}' +
-            // Штатный маркер обрезает текст на 5em, а «1175 серия · Amazing Dubbing» длиннее
-            '.shikimori-card .card__marker>span{max-width:11em}' +
-            // Блок заголовка ровно в две строки — фиксированной высоты, а не по
-            // содержимому. Иначе год у соседних карточек стоит на разной высоте
-            // и строка выглядит несобранной. Выровненность и «год вплотную»
-            // несовместимы при разной длине названий: выбран первый вариант,
-            // цена — одна пустая строка у коротких названий. Три строки, как в
-            // Lampa, брать нельзя — там цена уже две пустые
-            '.shikimori-card .card__title{-webkit-line-clamp:2;line-clamp:2;height:2.4em}' +
-            // Подсказка, что строка прокручивается. Штатную «выглядывающую»
-            // карточку сделать нельзя: сколько карточек рисовать, Lampa решает
-            // сама, а InteractionMain пробрасывает в строку фиксированный набор
-            // параметров без нужного рычага. Затемнение у края даёт тот же сигнал
-            // и не трогает геометрию
-            '.items-line--type-shiki .items-line__body{position:relative}' +
-            // Затемнение включается только когда строка правда прокручивается,
-            // и заметно мягче: раньше оно висело на каждой строке, включая короткие
-            '.items-line--type-shiki.shikimori-scrollable .items-line__body:after{content:"";position:absolute;top:0;bottom:0;right:0;width:1.5em;pointer-events:none;background:-webkit-linear-gradient(left,rgba(0,0,0,0),rgba(0,0,0,0.28));background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,0.28))}' +
-            // Прогресс просмотра
-            // Дорожка светлая: тёмная на тёмном постере не читалась, и заполнение
-            // выглядело случайной полоской в углу, а не прогрессом
-            '.shikimori-progress{position:absolute;left:0.6em;right:0.6em;bottom:0.6em;height:0.4em;background:rgba(255,255,255,0.25);-webkit-border-radius:0.4em;border-radius:0.4em;overflow:hidden;z-index:2}' +
-            '.shikimori-progress i{display:block;height:100%;width:0;background:#5DBFF5}' +
-            '.shikimori-card--progress .card__vote,.shikimori-card--progress .card__marker{bottom:1.4em}' +
-            '.shikimori-card--compact{width:9.5em}' +
-            '.shikimori-card--compact .card__title{font-size:1.05em;-webkit-line-clamp:1;line-clamp:1;max-height:1.4em;min-height:1.4em}' +
-            '.shikimori-card--compact .card__age{display:none}' +
-            '.shikimori-card--compact .card__promo{display:none}' +
-            '.shikimori-card--compact .card__vote{font-size:1em}' +
-            '.shikimori-card--compact .card__marker>span{font-size:0.7em}' +
-            '.shikimori-card--poster{width:15em}' +
-            '.shikimori-card--poster .card__title,.shikimori-card--poster .card__age{display:none}' +
-            '.shikimori-card--poster .card__view{margin-bottom:0}' +
-            '.shikimori-card--poster .card__promo{padding:2em 0.8em 0.8em 0.8em}' +
-            '.shikimori-card--poster .card__promo-title{font-size:1.2em}' +
-            '.shikimori-card--poster .card__marker{bottom:auto;top:0.6em;left:0.6em}' +
-            // рейтинг Shikimori и строка следующей серии в полной карточке
+            '.shikimori-day{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;' +
+                'font-size:1.4em;margin:0 0 0.6em 0;opacity:0.75}' +
+
+            /* --- Тиры: телевизор медиазапросом не определяется, класс ставит JS --- */
+            '.shiki-tier--phone .shikimori-card .card__vote,' +
+            '.shiki-tier--phone .shikimori-card .card__marker{display:none}' +
+            '.shiki-tier--phone .shikimori-card .shikimori-year,' +
+            '.shiki-tier--phone .shikimori-card .card__new-episode>div{font-size:0.95em}' +
+            '.shiki-tier--phone .shikimori-progress{height:0.4em}' +
+            '.shiki-tier--tv .shikimori-card .card__vote,' +
+            '.shiki-tier--tv .shikimori-card .card__type,' +
+            '.shiki-tier--tv .shikimori-card .card__marker,' +
+            '.shiki-tier--tv .shikimori-card .shikimori-year,' +
+            '.shiki-tier--tv .shikimori-card .card__new-episode>div{font-size:0.9em}' +
+
+            /* --- Счётчик на пункте меню --- */
+            '.menu__item .shikimori-badge{margin-left:auto;background:#5DBFF5;color:#06283A;font-size:0.8em;' +
+                'font-weight:700;min-width:1.7em;height:1.7em;line-height:1.7em;text-align:center;' +
+                '-webkit-border-radius:1em;border-radius:1em;padding:0 0.4em;' +
+                '-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
+
+            /* --- Окно подключения аккаунта --- */
+            '.shikimori-auth{text-align:center;padding:1.5em 0}' +
+            '.shikimori-auth__text{font-size:1.1em;margin:0.6em 0;opacity:0.9}' +
+            '.shikimori-auth__qr{display:inline-block;background:#fff;padding:0.6em;' +
+                '-webkit-border-radius:0.3em;border-radius:0.3em;margin:0.6em 0}' +
+            '.shikimori-auth__qr img,.shikimori-auth__qr canvas,.shikimori-auth__qr svg{display:block;width:14em;height:14em}' +
+            '.shikimori-auth__url{font-size:0.8em;opacity:0.55;word-break:break-all;margin:0.6em 2.25em}' +
+
+            /* --- Полная карточка --- */
             '.shikimori-rate{background:rgba(255,255,255,0.12)}' +
-            '.shikimori-next{margin-left:0.5em;color:#5DBFF5}' +
+            '.shikimori-next{margin-left:0.6em;color:#5DBFF5}' +
             '</style>');
 
         $('body').append(Lampa.Template.get('shikimori_style', {}, true));
