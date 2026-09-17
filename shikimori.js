@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '3.4.0';
+    var VERSION = '3.5.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -53,6 +53,10 @@
     var PROGRESS_SEASON_HARD = 12;   // и дальше, если карточка знает о большем
     var PROGRESS_SEASON_PROBE = 3;   // сколько первых серий щупать, чтобы отсечь пустой сезон
     var PROGRESS_PROBE_BUDGET = 700; // потолок обращений к таймлайну на карточку
+    var RETRY_MAX = 2;                        // повторов после 429/5xx
+    var RETRY_DELAY = 1200;                   // пауза перед первым, дальше вдвое
+    var TRANSLATIONS_TTL = 7 * 24 * 60 * 60 * 1000; // список студий Kodik: неделя
+    var TRANSLATIONS_MAX = 150;               // и сколько самых ходовых показываем
     var TMDB_INFO_KEY = 'shikimori_tmdb_info';
     var TMDB_INFO_MAX = 60;      // сколько закладок дозапрашиваем за один заход
     var TMDB_INFO_PARALLEL = 4;  // и по сколько запросов разом                  // больше кура непросмотренного — значит нумерация разошлась
@@ -90,6 +94,29 @@
 
     function storSet(name, value) {
         Lampa.Storage.set(name, value);
+    }
+
+    /* Кому возвращать фокус, когда список закроется.
+     *
+     * Lampa.Select.show() сама переключает контроллер на 'select', поэтому
+     * внутри onSelect/onCheck/onBack текущий контроллер — это уже сам список.
+     * Запомнить его и потом вернуться в него — значит отдать управление
+     * закрытому окну: экран перестаёт слушать пульт. Так ломалось управление
+     * после вложенных списков фильтра. Берём имя только когда оно не 'select',
+     * а последнее нормальное держим про запас. */
+    var last_owner = 'content';
+
+    function ownerController() {
+        var name = '';
+        try { name = Lampa.Controller.enabled().name; }
+        catch (e) {}
+        if (name && name != 'select') last_owner = name;
+        return last_owner;
+    }
+
+    function restoreController(name) {
+        try { Lampa.Controller.toggle(name && name != 'select' ? name : last_owner); }
+        catch (e) {}
     }
 
     // ISO-строка с таймзоной -> ms (ручной парсер для старых WebKit)
@@ -189,9 +216,41 @@
 
     function NetPool() {
         this.list = [];
+        this.timers = [];
+        this.gen = 0;   // поколение: clear() отменяет и уже назначенные повторы
     }
 
+    // Запрос с повтором. У Shikimori жёсткий лимит (5 запросов в секунду),
+    // и 429 там означает «подожди», а не «нельзя»: без повтора экран просто
+    // оставался пустым — так пропадал календарь и сбрасывался каталог.
+    // Повторяем только то, что имеет смысл повторять: лимит и 5xx
     NetPool.prototype.req = function (method, url, body, headers, ok, err, timeout) {
+        var self = this;
+        var gen = this.gen;
+        var tries = 0;
+
+        function send() {
+            self.once(method, url, body, headers, function (data) {
+                if (gen == self.gen && ok) ok(data);
+            }, function (reason) {
+                if (gen != self.gen) return;
+                var again = reason == 429 || (typeof reason == 'number' && reason >= 500 && reason < 600);
+                if (!again || tries >= RETRY_MAX) return err ? err(reason) : null;
+                tries++;
+                var timer = setTimeout(function () {
+                    var at = self.timers.indexOf(timer);
+                    if (at >= 0) self.timers.splice(at, 1);
+                    if (gen == self.gen) send();
+                }, RETRY_DELAY * tries);
+                self.timers.push(timer);
+            }, timeout);
+        }
+
+        send();
+        return null;
+    };
+
+    NetPool.prototype.once = function (method, url, body, headers, ok, err, timeout) {
         var self = this;
         var xhr = new XMLHttpRequest();
         var finished = false;
@@ -255,10 +314,13 @@
     };
 
     NetPool.prototype.clear = function () {
+        this.gen++;
         for (var i = 0; i < this.list.length; i++) {
             try { this.list[i].abort(); } catch (e) {}
         }
         this.list = [];
+        for (i = 0; i < this.timers.length; i++) clearTimeout(this.timers[i]);
+        this.timers = [];
     };
 
     // Общий пул для фоновых задач (матчинг, обогащение карточек)
@@ -278,6 +340,12 @@
         // enum-значения берём только из собственных белых списков
         graphql: function (net, query, ok, err) {
             net.post(this.base() + '/api/graphql', { query: query }, function (json) {
+                // Ошибку запроса Shikimori кладёт в errors, а data при этом null.
+                // Раньше это выглядело как «в каталоге пусто», и понять, что
+                // именно не понравилось серверу, было нельзя
+                if (json && json.errors && json.errors.length) {
+                    return err('graphql: ' + (json.errors[0].message || 'error'));
+                }
                 if (json && json.data) ok(json.data);
                 else err('graphql');
             }, err);
@@ -370,36 +438,102 @@
         },
 
         calendar: function (net, ok, err) {
+            var self = this;
             var cached = storGet('shikimori_calendar_cache', null);
             if (cached && cached.time && Date.now() - cached.time < CALENDAR_TTL && cached.data && cached.data.length) {
                 return ok(cached.data);
             }
             net.get(this.base() + '/api/calendar', function (list) {
-                if (!list || !list.length) return err('calendar');
-                // Храним только нужное — календарь большой
+                var slim = self.calendarSlim(list || []);
+                // Пустой ответ — это тоже отказ: онгоингов не бывает ноль
+                if (!slim.length) return self.calendarGraphql(net, ok, err, 'empty');
+                self.calendarRemember(slim);
+                ok(slim);
+            }, function (reason) {
+                self.calendarGraphql(net, ok, err, reason);
+            });
+        },
+
+        // Ответ REST-календаря -> то, что нужно экрану. Храним только это:
+        // календарь целиком большой, а в Storage он лежит сутками
+        calendarSlim: function (list) {
+            var slim = [];
+            for (var i = 0; i < list.length; i++) {
+                var e = list[i];
+                if (!e || !e.anime || !e.next_episode_at) continue;
+                slim.push({
+                    episode: e.next_episode,
+                    at: parseISO(e.next_episode_at),
+                    anime: {
+                        id: e.anime.id,
+                        name: e.anime.name,
+                        russian: e.anime.russian,
+                        image: e.anime.image && e.anime.image.original ? e.anime.image.original : '',
+                        kind: e.anime.kind,
+                        score: e.anime.score,
+                        status: e.anime.status,
+                        episodes: e.anime.episodes,
+                        episodes_aired: e.anime.episodes_aired
+                    }
+                });
+            }
+            return slim;
+        },
+
+        calendarRemember: function (slim) {
+            storSet('shikimori_calendar_cache', { time: Date.now(), data: slim });
+        },
+
+        // Запасной календарь через GraphQL. /api/calendar — единственная точка,
+        // и когда она молчит (лимит запросов, прокси, временный отказ), экран
+        // раньше оставался пустым без единого слова. Даты ближайших серий есть
+        // и у самих тайтлов — nextEpisodeAt, этого достаточно
+        calendarGraphql: function (net, ok, err, reason) {
+            var self = this;
+            var rows = [];
+            var page = 1;
+
+            function ask() {
+                var q = '{ animes(' + self.animesArgs({ limit: 50, page: page, status: 'ongoing', order: 'popularity' }) +
+                        ') { ' + self.animeFields() + ' } }';
+                self.graphql(net, q, function (data) {
+                    var list = data.animes || [];
+                    rows = rows.concat(list);
+                    page++;
+                    if (list.length >= 50 && page <= 2) return ask();
+                    finish();
+                }, finish);
+            }
+
+            function finish() {
                 var slim = [];
-                for (var i = 0; i < list.length; i++) {
-                    var e = list[i];
-                    if (!e || !e.anime || !e.next_episode_at) continue;
+                for (var i = 0; i < rows.length; i++) {
+                    var anime = rows[i];
+                    var at = parseISO(anime.nextEpisodeAt);
+                    if (!at) continue;
                     slim.push({
-                        episode: e.next_episode,
-                        at: parseISO(e.next_episode_at),
+                        episode: (parseInt(anime.episodesAired, 10) || 0) + 1,
+                        at: at,
                         anime: {
-                            id: e.anime.id,
-                            name: e.anime.name,
-                            russian: e.anime.russian,
-                            image: e.anime.image && e.anime.image.original ? e.anime.image.original : '',
-                            kind: e.anime.kind,
-                            score: e.anime.score,
-                            status: e.anime.status,
-                            episodes: e.anime.episodes,
-                            episodes_aired: e.anime.episodes_aired
+                            id: parseInt(anime.malId || anime.id, 10),
+                            name: anime.name,
+                            russian: anime.russian,
+                            image: '',
+                            poster_url: anime.poster ? (anime.poster.mainUrl || anime.poster.originalUrl || '') : '',
+                            kind: anime.kind,
+                            score: anime.score,
+                            status: anime.status,
+                            episodes: anime.episodes,
+                            episodes_aired: anime.episodesAired
                         }
                     });
                 }
-                storSet('shikimori_calendar_cache', { time: Date.now(), data: slim });
+                if (!slim.length) return err(reason || 'calendar');
+                self.calendarRemember(slim);
                 ok(slim);
-            }, err);
+            }
+
+            ask();
         },
 
         // Жанры, темы и демография одним запросом. REST /api/genres отдаёт
@@ -504,8 +638,36 @@
             return false;
         },
 
-        // Студии, которые реально встречаются в ваших данных — из них и выбираем.
-        // Полный словарь Kodik это тысячи строк, листать их с пульта невозможно
+        // Полный список студий Kodik, самые ходовые сверху. Раньше выбирать
+        // предлагалось только из тех, что попались в суточной ленте: нужной
+        // студии там могло не быть вовсе, и отметить её было нечем.
+        // Кэш на неделю — список меняется медленно
+        translations: function (net, ok) {
+            var self = this;
+            var cached = storGet('shikimori_translations', null);
+            if (cached && cached.time && Date.now() - cached.time < TRANSLATIONS_TTL &&
+                cached.list && cached.list.length) return ok(cached.list);
+
+            this.request(net, '/translations', '&types=anime-serial,anime', function (json) {
+                var rows = json.results || [];
+                var list = [];
+                for (var i = 0; i < rows.length; i++) {
+                    var row = rows[i];
+                    if (!row || !row.title) continue;
+                    if (row.type == 'subtitles' && !self.withSubtitles()) continue;
+                    list.push({ title: String(row.title), count: parseInt(row.count, 10) || 0 });
+                }
+                // По числу озвучек: сверху те, кого человек реально встречает
+                list.sort(function (a, b) { return b.count - a.count; });
+                if (list.length) storSet('shikimori_translations', { time: Date.now(), list: list });
+                ok(list);
+            }, function () {
+                ok(cached && cached.list ? cached.list : []);
+            });
+        },
+
+        // Студии, которые встречаются в ваших данных: ими дополняем общий
+        // список и ими же обходимся, если Kodik не отдал словарь
         knownStudios: function () {
             var seen = {};
             var rows = this.feed_cache || [];
@@ -711,23 +873,101 @@
      * ============================================================ */
 
     var Hidden = {
+        // Список читается на каждой карточке, а Storage каждый раз разбирает JSON —
+        // держим разобранным, как и накопленные серии Kodik
+        memo: null,
+
         all: function () {
+            if (this.memo) return this.memo;
             var map = storGet('shikimori_hidden', {});
-            return map && typeof map == 'object' ? map : {};
+            this.memo = map && typeof map == 'object' ? map : {};
+            return this.memo;
+        },
+
+        save: function (map) {
+            this.memo = map;
+            storSet('shikimori_hidden', map);
+        },
+
+        // Один и тот же тайтл приходит тремя путями: карточкой Shikimori (id),
+        // строкой Kodik (shikimori_id) и закладкой Lampa (id TMDB). Раньше
+        // скрытие умело только средний случай, поэтому в каталоге пункта
+        // «Не интересует» не было вовсе, а скрытое всё равно показывалось.
+        // Поэтому у карточки есть НАБОР ключей, и совпадения любого хватает
+        keys: function (card) {
+            var keys = [];
+            if (!card) return keys;
+
+            function add(prefix, value) {
+                var id = parseInt(value, 10);
+                if (!id) return;
+                var key = prefix + id;
+                if (keys.indexOf(key) < 0) keys.push(key);
+            }
+
+            if (card._kodik) add('s', card._kodik.sid);
+            if (card._sids) for (var i = 0; i < card._sids.length; i++) add('s', card._sids[i]);
+            if (!isTmdbCard(card)) {
+                add('s', card.id);
+                add('s', card.malId);
+            }
+            else add('t', card.id);
+            if (card._direct_tmdb) add('t', card._direct_tmdb.id);
+            return keys;
         },
 
         has: function (sid) {
-            return !!this.all()['s' + sid];
+            return !!this.all()['s' + parseInt(sid, 10)];
         },
 
-        toggle: function (sid) {
+        hasCard: function (card) {
+            var keys = this.keys(card);
             var map = this.all();
-            if (map['s' + sid]) delete map['s' + sid];
-            else map['s' + sid] = Date.now();
-            storSet('shikimori_hidden', map);
-            return !!map['s' + sid];
+            for (var i = 0; i < keys.length; i++) if (map[keys[i]]) return true;
+            return false;
+        },
+
+        // Скрываем по всем ключам разом: карточка того же тайтла в другой
+        // строке придёт с другим идентификатором, и по одному ключу мы бы
+        // её не узнали. Название храним тут же — иначе список скрытого
+        // нечем подписать, пока Shikimori не ответит
+        toggleCard: function (card, title) {
+            var keys = this.keys(card);
+            if (!keys.length) return false;
+
+            var map = this.all();
+            var hide = !this.hasCard(card);
+
+            for (var i = 0; i < keys.length; i++) {
+                if (hide) map[keys[i]] = { at: Date.now(), title: title || '', group: keys[0] };
+                else delete map[keys[i]];
+            }
+            this.save(map);
+            return hide;
+        },
+
+        // Вернуть тайтл: снимаем всю группу ключей, которой его прятали
+        drop: function (key) {
+            var map = this.all();
+            var rec = map[key];
+            var group = rec && typeof rec == 'object' ? rec.group : '';
+            delete map[key];
+            if (group) {
+                for (var other in map) {
+                    var item = map[other];
+                    if (item && typeof item == 'object' && item.group == group) delete map[other];
+                }
+            }
+            this.save(map);
         }
     };
+
+    // Карточка TMDB или Shikimori — от этого зависит и вид карточки, и то,
+    // каким идентификатором тайтл вообще опознаётся
+    function isTmdbCard(data) {
+        return !!(data.poster_path || data.backdrop_path || data.first_air_date ||
+                  data.release_date || data._tmdb_card);
+    }
 
     /* ============================================================
      * Ник Shikimori
@@ -760,106 +1000,194 @@
     // её не вернуть — список нужен отдельным экраном в настройках
     function pickHidden() {
         var map = Hidden.all();
-        var sids = [];
+        var rows = [];
+        var need = [];
+
         for (var key in map) {
-            var sid = parseInt(String(key).replace('s', ''), 10);
-            if (sid) sids.push(sid);
+            var rec = map[key];
+            // Ключи одного тайтла лежат группой — показываем только первый
+            if (rec && typeof rec == 'object' && rec.group && rec.group != key) continue;
+            var title = rec && typeof rec == 'object' ? (rec.title || '') : '';
+            rows.push({ key: key, title: title });
+            if (!title && key.charAt(0) == 's') need.push(parseInt(key.slice(1), 10));
         }
 
-        if (!sids.length) return Lampa.Noty.show(Lampa.Lang.translate('shikimori_hidden_empty'));
+        if (!rows.length) return Lampa.Noty.show(Lampa.Lang.translate('shikimori_hidden_empty'));
 
-        var enabled = Lampa.Controller.enabled().name;
+        var owner = ownerController();
 
-        Shiki.animesByIds(background_net, sids.slice(0, 100), function (animes) {
-            var items = [];
+        // Названия скрытого теперь хранятся вместе с записью, и список
+        // открывается без сети. Сеть нужна только для старых записей,
+        // спрятанных прежними версиями плагина
+        if (!need.length) return show();
+
+        Shiki.animesByIds(background_net, need.slice(0, 100), function (animes) {
+            var by = {};
             for (var i = 0; i < animes.length; i++) {
+                var name = animes[i].russian || animes[i].name;
+                by['s' + parseInt(animes[i].id, 10)] = name;
+                if (animes[i].malId) by['s' + parseInt(animes[i].malId, 10)] = name;
+            }
+            for (i = 0; i < rows.length; i++) if (!rows[i].title) rows[i].title = by[rows[i].key] || '';
+            show();
+        }, show);
+
+        function show() {
+            var items = [];
+            for (var i = 0; i < rows.length; i++) {
                 items.push({
-                    title: animes[i].russian || animes[i].name,
-                    sid: parseInt(animes[i].malId || animes[i].id, 10)
+                    title: rows[i].title || (Lampa.Lang.translate('shikimori_hidden_unknown') + ' ' + rows[i].key),
+                    key: rows[i].key,
+                    checkbox: true,
+                    checked: true
                 });
             }
-            if (!items.length) return Lampa.Noty.show(Lampa.Lang.translate('shikimori_hidden_empty'));
 
             Lampa.Select.show({
                 title: Lampa.Lang.translate('shikimori_settings_hidden'),
                 items: items,
-                onSelect: function (item) {
-                    Lampa.Controller.toggle(enabled);
-                    Hidden.toggle(item.sid);
+                nohide: true,
+                // Галочка стоит у скрытого: снимаете — тайтл возвращается.
+                // Список не закрывается, поэтому вернуть можно сразу несколько
+                onCheck: function (item) {
+                    if (item.checked) return;
+                    Hidden.drop(item.key);
                     Lampa.Noty.show(Lampa.Lang.translate('shikimori_noty_unhidden'));
                 },
                 onBack: function () {
-                    Lampa.Controller.toggle(enabled);
+                    restoreController(owner);
                 }
             });
-        }, function () {
-            Lampa.Noty.show(Lampa.Lang.translate('shikimori_error_api'));
-        });
+        }
     }
 
-    // Выбор студий озвучки. Список собираем из тех, что встречаются в ваших
-    // тайтлах: полный словарь Kodik — тысячи строк, с пульта это нелистаемо
-    function pickStudios() {
-        var enabled = Lampa.Controller.enabled().name;
+    // Выбор студий озвучки — мультивыбор галочками.
+    //
+    // Раньше список строился с полем selected и обработчиком onCheck, но Lampa
+    // зовёт onCheck только у пунктов с checkbox: true, а без него срабатывает
+    // onSelect, которого не было. Поэтому нажатие не делало ничего: ни одной
+    // студии выбрать было нельзя, а окно закрывалось, не вернув управление.
+    // Теперь пункты — настоящие чекбоксы, а nohide держит список открытым,
+    // чтобы отметить сразу несколько
+    function pickStudios(filter) {
+        var owner = ownerController();
 
-        function show(names) {
+        function names(list) {
+            var seen = {};
+            var out = [];
+            for (var i = 0; i < list.length; i++) {
+                var name = typeof list[i] == 'string' ? list[i] : list[i].title;
+                if (!name || seen[name]) continue;
+                seen[name] = true;
+                out.push(name);
+            }
+            return out;
+        }
+
+        function show(all) {
             var chosen = Kodik.studios();
+            var needle = String(filter || '').toLowerCase();
+
+            // Выбранное — всегда наверху и всегда в списке, даже если студии
+            // сейчас нет в словаре Kodik: иначе снять галочку было бы нечем
+            var top = [];
+            var rest = [];
+            for (var i = 0; i < chosen.length; i++) top.push(chosen[i]);
+            for (i = 0; i < all.length; i++) {
+                if (chosen.indexOf(all[i]) >= 0) continue;
+                if (needle && all[i].toLowerCase().indexOf(needle) < 0) continue;
+                rest.push(all[i]);
+            }
+
+            // Студий у Kodik тысячи, и листать их с пульта невозможно: показываем
+            // самые ходовые, остальное достаётся поиском по названию
+            var hidden_count = Math.max(0, rest.length - TRANSLATIONS_MAX);
+            if (hidden_count) rest = rest.slice(0, TRANSLATIONS_MAX);
+
             var items = [{
                 title: Lampa.Lang.translate('shikimori_studios_any'),
-                value: '',
-                selected: !chosen.length
+                subtitle: chosen.length
+                    ? Lampa.Lang.translate('shikimori_studios_chosen') + ': ' + chosen.length
+                    : Lampa.Lang.translate('shikimori_studios_none'),
+                action: 'any'
+            }, {
+                title: filter
+                    ? Lampa.Lang.translate('shikimori_studios_search') + ': ' + filter
+                    : Lampa.Lang.translate('shikimori_studios_search'),
+                subtitle: hidden_count
+                    ? Lampa.Lang.translate('shikimori_studios_more') + ' ' + hidden_count
+                    : Lampa.Lang.translate('shikimori_studios_search_hint'),
+                action: 'search'
             }];
 
-            for (var i = 0; i < names.length; i++) {
+            var list = top.concat(rest);
+            for (i = 0; i < list.length; i++) {
                 items.push({
-                    title: names[i],
-                    value: names[i],
-                    selected: chosen.indexOf(names[i]) >= 0
+                    title: list[i],
+                    value: list[i],
+                    checkbox: true,
+                    checked: chosen.indexOf(list[i]) >= 0
                 });
             }
 
             Lampa.Select.show({
                 title: Lampa.Lang.translate('shikimori_settings_studios'),
                 items: items,
+                nohide: true,
                 onCheck: function (item) {
-                    if (!item.value) {
-                        storSet('shikimori_studios', []);
-                        item.selected = true;
-                    }
-                    else {
-                        var list = Kodik.studios();
-                        var at = list.indexOf(item.value);
-                        if (at >= 0) list.splice(at, 1);
-                        else list.push(item.value);
-                        storSet('shikimori_studios', list);
-                        item.selected = at < 0;
-                    }
+                    var current = Kodik.studios();
+                    var at = current.indexOf(item.value);
+                    if (item.checked && at < 0) current.push(item.value);
+                    if (!item.checked && at >= 0) current.splice(at, 1);
+                    storSet('shikimori_studios', current);
                     // Накопленные серии собраны по прежнему правилу — сбрасываем,
                     // иначе останутся числа от студий, которые больше не в счёт
                     storSet('shikimori_kodik_eps', {});
                     Kodik.dropCache();
                 },
+                onSelect: function (item) {
+                    if (item.action == 'any') {
+                        storSet('shikimori_studios', []);
+                        storSet('shikimori_kodik_eps', {});
+                        Kodik.dropCache();
+                        Lampa.Noty.show(Lampa.Lang.translate('shikimori_studios_any'));
+                        show(all);
+                    }
+                    if (item.action == 'search') {
+                        Lampa.Input.edit({
+                            title: Lampa.Lang.translate('shikimori_studios_search'),
+                            value: filter || '',
+                            free: true,
+                            nosave: true
+                        }, function (value) {
+                            filter = String(value || '').replace(/^\s+|\s+$/g, '');
+                            show(all);
+                        });
+                    }
+                },
                 onBack: function () {
-                    Lampa.Controller.toggle(enabled);
+                    restoreController(owner);
                 }
             });
         }
 
-        var known = Kodik.knownStudios();
-        if (known.length) return show(known);
+        // Полный словарь Kodik, дополненный тем, что встретилось у вас
+        Kodik.translations(background_net, function (rows) {
+            var all = names(rows.concat(Kodik.knownStudios()));
+            if (all.length) return show(all);
 
-        // Ещё ничего не знаем — подтянем ленту, чтобы было из чего выбирать
-        Lampa.Noty.show(Lampa.Lang.translate('shikimori_studios_loading'));
-        Kodik.feed(background_net, function () {
-            show(Kodik.knownStudios());
-        }, function () {
-            show([]);
+            // Kodik не отдал словарь и своих данных ещё нет — греем ленту
+            Lampa.Noty.show(Lampa.Lang.translate('shikimori_studios_loading'));
+            Kodik.feed(background_net, function () {
+                show(names(Kodik.knownStudios()));
+            }, function () {
+                show(names(Kodik.knownStudios()));
+            });
         });
     }
 
     // Меню по долгому нажатию на карточке — вместо лишних кнопок на экране
     function cardMenu(data) {
-        var sid = data._kodik && data._kodik.sid;
         var items = [];
 
         // Пункты подписаны по смыслу — иначе с пульта не понять,
@@ -896,9 +1224,12 @@
             });
         }
 
-        if (sid) {
+        // Скрыть можно всё, у чего есть хоть какой-то идентификатор. Раньше
+        // условием был номер из Kodik, поэтому в каталоге и в лентах Shikimori
+        // пункта «Не интересует» не было совсем
+        if (Hidden.keys(data).length) {
             items.push({
-                title: Lampa.Lang.translate(Hidden.has(sid) ? 'shikimori_menu_unhide' : 'shikimori_menu_hide'),
+                title: Lampa.Lang.translate(Hidden.hasCard(data) ? 'shikimori_menu_unhide' : 'shikimori_menu_hide'),
                 subtitle: Lampa.Lang.translate('shikimori_group_visible'),
                 action: 'hide'
             });
@@ -910,16 +1241,16 @@
             action: 'open'
         });
 
-        var enabled = Lampa.Controller.enabled().name;
+        var owner = ownerController();
 
         Lampa.Select.show({
             title: cardView(data).title,
             items: items,
             onSelect: function (item) {
-                Lampa.Controller.toggle(enabled);
+                restoreController(owner);
 
                 if (item.action == 'hide') {
-                    var hidden = Hidden.toggle(sid);
+                    var hidden = Hidden.toggleCard(data, cardView(data).title);
                     Lampa.Noty.show(Lampa.Lang.translate(hidden ? 'shikimori_noty_hidden' : 'shikimori_noty_unhidden'));
                     if (hidden && data._card_el && data._card_el.parentNode) data._card_el.style.display = 'none';
                 }
@@ -962,7 +1293,7 @@
                 }
             },
             onBack: function () {
-                Lampa.Controller.toggle(enabled);
+                restoreController(owner);
             }
         });
     }
@@ -1547,17 +1878,17 @@
                         candidate: cc
                     });
                 }
-                var enabled = Lampa.Controller.enabled().name;
+                var owner = ownerController();
                 Lampa.Select.show({
                     title: Lampa.Lang.translate('shikimori_pick_title'),
                     items: items,
                     onSelect: function (item) {
-                        Lampa.Controller.toggle(enabled);
+                        restoreController(owner);
                         self.cacheSet(mal_id, { tmdb: item.candidate.id, media: type });
                         ok({ id: item.candidate.id, method: type });
                     },
                     onBack: function () {
-                        Lampa.Controller.toggle(enabled);
+                        restoreController(owner);
                     }
                 });
             }
@@ -2021,6 +2352,7 @@
             for (var key in item.card) card[key] = item.card[key];
 
             card._kodik = item.kodik || null;
+            card._sids = item.sids || null;   // по ним карточку закладки можно скрыть
             card._kodik_new = item.fresh || 0;
             card._watched_ep = item.watched || 0;
             card._total_ep = item.total || 0;
@@ -2124,7 +2456,7 @@
     // Одна карточка на весь плагин: данные приходят и от Shikimori, и от TMDB/CUB,
     // поэтому поля сводим к общему виду, а разметка всегда штатная разметка Lampa
     function cardView(data) {
-        var tmdb = !!(data.poster_path || data.backdrop_path || data.first_air_date || data.release_date || data._tmdb_card);
+        var tmdb = isTmdbCard(data);
         var title, poster, score, year;
 
         if (tmdb) {
@@ -2600,7 +2932,6 @@
                             results: lines[line.key],
                             shiki: true,
                             line_type: 'shiki',
-                    line_type: 'shiki',
                             noimage: true,
                             onMore: function () { openCatalog({ filters: line.params }); },
                             cardClass: function (elem) { return new ShikiCard(elem); }
@@ -2708,7 +3039,14 @@
     // а также помеченное в Lampa как просмотренное или брошенное — там решение
     // уже принято, и новая серия ничего не меняет
     function visible(item) {
-        if (item.kodik && Hidden.has(item.kodik.sid)) return false;
+        // Проверяем тайтл всеми его идентификаторами: скрыть могли карточку
+        // из каталога, а тот же тайтл лежит в закладках под номером TMDB
+        if (Hidden.hasCard({
+            _kodik: item.kodik,
+            _sids: item.sids,
+            _tmdb_card: !!item.tmdb,
+            id: item.tmdb ? item.tmdb.id : (item.card && item.card.id)
+        })) return false;
         if (item.groups && (item.groups.viewed || item.groups.thrown)) return false;
         return true;
     }
@@ -2867,7 +3205,6 @@
     var FILTER_ORDERS = ['popularity', 'ranked', 'aired_on', 'name', 'random'];
     var FILTER_DURATIONS = ['S', 'D', 'F'];   // до 10 минут, до 30, свыше
     var FILTER_RATINGS = ['g', 'pg', 'pg_13', 'r', 'r_plus'];
-    var FILTER_ORDERS = ['popularity', 'ranked', 'aired_on', 'name', 'random'];
     var FILTER_SCORES = [9, 8, 7, 6];
 
     function CatalogComponent(object) {
@@ -2940,15 +3277,23 @@
             head_el = document.createElement('div');
             head_el.className = 'shikimori-head';
 
-            Shiki.genresAll(net, function (list) {
-                genres = list;
-                self.updateHead();
-            }, function () {
-                self.updateHead();
-            });
+            // Фоновым пулом, а не своим: reload() очищает свой пул, и вместе
+            // с сеткой обрывался запрос жанров — после первой же смены фильтра
+            // список жанров оставался пустым до перезахода на экран
+            self.loadGenres(function () { self.updateHead(); });
 
             this.updateHead();
             return head_el;
+        };
+
+        this.loadGenres = function (done) {
+            if (genres.length) return done();
+            Shiki.genresAll(background_net, function (list) {
+                genres = list;
+                done();
+            }, function () {
+                done();
+            });
         };
 
         // Три кнопки, как в родном каталоге Lampa: поиск, сортировка, фильтр.
@@ -3002,7 +3347,7 @@
 
         // Список категорий: подпись под каждой — что выбрано сейчас
         this.openFilterMenu = function () {
-            var enabled = Lampa.Controller.enabled().name;
+            var owner = ownerController();
             var cats = this.filterCategories();
             var items = [];
             var any = Lampa.Lang.translate('shikimori_any');
@@ -3030,7 +3375,7 @@
                     if (item.key == 'reset_filters') {
                         var keys = ['genre', 'theme', 'demographic', 'kind', 'status', 'season', 'score', 'duration', 'rating'];
                         for (var j = 0; j < keys.length; j++) object.filters[keys[j]] = '';
-                        Lampa.Controller.toggle(enabled);
+                        restoreController(owner);
                         self.updateHead();
                         self.reload();
                         return;
@@ -3038,7 +3383,7 @@
                     // Из категории возвращаемся обратно в список, а не наружу
                     self.openFilter(item.key, function () { self.openFilterMenu(); });
                 },
-                onBack: function () { Lampa.Controller.toggle(enabled); }
+                onBack: function () { restoreController(owner); }
             });
         };
 
@@ -3098,7 +3443,7 @@
         };
 
         this.openFilter = function (key, back) {
-            var enabled = Lampa.Controller.enabled().name;
+            var owner = ownerController();
 
             if (key == 'search') return this.searchInput();
             if (key == 'filter') return this.openFilterMenu();
@@ -3110,13 +3455,17 @@
                 return;
             }
 
-            if (key == 'genre' || key == 'theme' || key == 'demographic') return this.openGenres(key, enabled, back);
+            if (key == 'genre' || key == 'theme' || key == 'demographic') return this.openGenres(key, back);
 
             var items = [];
             var current = object.filters[key];
             var i;
 
-            items.push({ title: Lampa.Lang.translate('shikimori_any'), value: '', selected: !current });
+            items.push({
+                title: Lampa.Lang.translate(key == 'order' ? 'shikimori_order_default' : 'shikimori_any'),
+                value: '',
+                selected: !current
+            });
 
             if (key == 'season') {
                 var list = this.seasonValues();
@@ -3154,62 +3503,82 @@
                     self.updateHead();
                     self.reload();
                     if (back) back();
-                    else Lampa.Controller.toggle(enabled);
+                    else restoreController(owner);
                 },
                 onBack: function () {
                     if (back) back();
-                    else Lampa.Controller.toggle(enabled);
+                    else restoreController(owner);
                 }
             });
         };
 
         // Жанры, темы и демография — мультивыбор: у Shikimori это один параметр,
-        // различаются только идентификаторы. Мультивыбор сделан переоткрытием
-        // списка: onCheck в этой сборке Lampa не вызывается, а onSelect есть всегда
-        this.openGenres = function (kind, enabled, back) {
+        // различаются только идентификаторы. Отмечаются галочками, список при
+        // этом не закрывается (nohide), поэтому выбрать можно сразу несколько.
+        // Раньше здесь был обход через переоткрытие списка: считалось, что
+        // onCheck не вызывается. Вызывается — но только у пунктов с checkbox
+        this.openGenres = function (kind, back) {
+            var owner = ownerController();
+
+            // Справочник мог не успеть загрузиться — дожидаемся его,
+            // вместо того чтобы показывать «ошибка API» на пустом списке
+            if (!genres.length) {
+                Lampa.Noty.show(Lampa.Lang.translate('shikimori_genres_loading'));
+                return this.loadGenres(function () {
+                    if (genres.length) self.openGenres(kind, back);
+                    else Lampa.Noty.show(Lampa.Lang.translate('shikimori_error_api'));
+                });
+            }
+
             var chosen = String(object.filters[kind] || '').split(',').filter(function (v) { return v; });
-            var items = [{ title: Lampa.Lang.translate('shikimori_any'), value: '', selected: !chosen.length }];
+            var items = [{
+                title: Lampa.Lang.translate('shikimori_any'),
+                subtitle: chosen.length
+                    ? Lampa.Lang.translate('shikimori_chosen') + ': ' + chosen.length
+                    : '',
+                action: 'any'
+            }];
 
             for (var i = 0; i < genres.length; i++) {
                 if (genres[i].kind != kind) continue;
                 var id = String(genres[i].id);
-                var on = chosen.indexOf(id) >= 0;
                 items.push({
-                    title: (on ? '✓ ' : '') + genres[i].title,
+                    title: genres[i].title,
                     value: id,
-                    selected: on
+                    checkbox: true,
+                    checked: chosen.indexOf(id) >= 0
                 });
             }
 
             if (items.length < 2) return Lampa.Noty.show(Lampa.Lang.translate('shikimori_error_api'));
 
+            function close() {
+                self.reload();
+                if (back) back();
+                else restoreController(owner);
+            }
+
             Lampa.Select.show({
                 title: Lampa.Lang.translate('shikimori_chip_' + kind),
                 items: items,
-                onSelect: function (item) {
-                    if (!item.value) object.filters[kind] = '';
-                    else {
-                        var list = String(object.filters[kind] || '').split(',').filter(function (v) { return v; });
-                        var at = list.indexOf(item.value);
-                        if (at >= 0) list.splice(at, 1);
-                        else list.push(item.value);
-                        object.filters[kind] = list.join(',');
-                    }
+                nohide: true,
+                onCheck: function (item) {
+                    var list = String(object.filters[kind] || '').split(',').filter(function (v) { return v; });
+                    var at = list.indexOf(item.value);
+                    if (item.checked && at < 0) list.push(item.value);
+                    if (!item.checked && at >= 0) list.splice(at, 1);
+                    object.filters[kind] = list.join(',');
                     self.updateHead();
-                    // Список открывается заново с обновлёнными галочками —
-                    // так отмечают несколько значений подряд, не выходя наружу
-                    if (item.value) self.openGenres(kind, enabled, back);
-                    else {
-                        self.reload();
-                        if (back) back();
-                        else Lampa.Controller.toggle(enabled);
-                    }
                 },
-                onBack: function () {
-                    self.reload();
-                    if (back) back();
-                    else Lampa.Controller.toggle(enabled);
-                }
+                onSelect: function (item) {
+                    if (item.action != 'any') return;
+                    // Список остаётся открытым (nohide), поэтому не закрываемся,
+                    // а перерисовываем его уже без галочек
+                    object.filters[kind] = '';
+                    self.updateHead();
+                    self.openGenres(kind, back);
+                },
+                onBack: close
             });
         };
 
@@ -3267,17 +3636,41 @@
             return params;
         };
 
+        // Поиск у Shikimori отдаёт результаты по релевантности и параметр order
+        // при этом не применяет: выбранная сортировка просто не срабатывала.
+        // Сортируем такую выдачу сами — по тому же полю, что выбрано в шапке
+        this.ordered = function (list) {
+            var order = object.filters.order;
+            if (!object.filters.search || !order || order == 'random') return list;
+
+            var sorted = list.slice(0);
+            sorted.sort(function (a, b) {
+                if (order == 'ranked') return (parseFloat(b.score) || 0) - (parseFloat(a.score) || 0);
+                if (order == 'aired_on') {
+                    return ((b.airedOn && b.airedOn.year) || 0) - ((a.airedOn && a.airedOn.year) || 0);
+                }
+                if (order == 'name') {
+                    var an = (a.russian || a.name || '').toLowerCase();
+                    var bn = (b.russian || b.name || '').toLowerCase();
+                    return an > bn ? 1 : (an < bn ? -1 : 0);
+                }
+                return 0;
+            });
+            return sorted;
+        };
+
         this.load = function (first) {
             if (object.mode == 'mylist') return this.loadMylist(first);
             if (object.mode == 'calendar') return this.loadCalendar(first);
 
             Shiki.catalog(net, this.requestParams(), function (list) {
                 has_more = list.length >= 36;
-                self.append(list);
+                self.append(self.ordered(list));
                 if (first) self.ready(list.length);
                 waitload = false;
-            }, function () {
+            }, function (reason) {
                 waitload = false;
+                Lampa.Noty.show(Lampa.Lang.translate('shikimori_error_api') + (reason ? ' · ' + reason : ''));
                 if (first) self.empty();
             });
         };
@@ -3323,7 +3716,8 @@
                     total += groups[i].cards.length;
                 }
                 if (first) self.ready(total);
-            }, function () {
+            }, function (reason) {
+                Lampa.Noty.show(Lampa.Lang.translate('shikimori_error_calendar') + (reason ? ' · ' + reason : ''));
                 if (first) self.empty();
             });
         };
@@ -3405,18 +3799,25 @@
             Shiki.catalog(net, this.requestParams(), function (list) {
                 if (my_id != reload_id) return;
                 has_more = list.length >= 36;
-                self.append(list);
+                self.append(self.ordered(list));
                 self.activity.loader(false);
                 if (!list.length) Lampa.Noty.show(Lampa.Lang.translate('shikimori_empty'));
-            }, function () {
+            }, function (reason) {
                 if (my_id != reload_id) return;
                 self.activity.loader(false);
-                Lampa.Noty.show(Lampa.Lang.translate('shikimori_error_api'));
+                // Причину показываем прямо на экране: «просто пусто» после смены
+                // сортировки — это не ответ, а с пульта в консоль не заглянешь
+                Lampa.Noty.show(Lampa.Lang.translate('shikimori_error_api') +
+                    (reason ? ' · ' + reason : ''));
             });
         };
 
         this.append = function (list) {
             for (var i = 0; i < list.length; i++) {
+                // «Не интересует» должно работать и здесь: раньше скрытое
+                // отфильтровывалось только в личных строках на главной,
+                // а в каталоге и календаре тайтл возвращался как ни в чём не бывало
+                if (Hidden.hasCard(list[i])) continue;
                 (function (anime) {
                     var card = new ShikiCard(anime);
                     card.create();
@@ -3585,6 +3986,31 @@
      * Настройки
      * ============================================================ */
 
+    // Одна точка входа для всех параметров.
+    //
+    // Lampa рисует в колонку значения то, что лежит в Storage, а если там
+    // пусто — подставляет placeholder, взятый из param.placeholder. Мы его не
+    // задавали, и в разметку уезжала строка "undefined": именно она и висела
+    // в настройках у пустого ника, токена и прокси
+    function settingsParam(data) {
+        data.component = 'shikimori';
+        if (data.param.type == 'input' && !data.param.placeholder) {
+            data.param.placeholder = Lampa.Lang.translate('shikimori_value_empty');
+        }
+
+        var onRender = data.onRender;
+        data.onRender = function (item) {
+            try {
+                var value = item.find('.settings-param__value');
+                if (value.text() == 'undefined') value.text('');
+            }
+            catch (e) {}
+            if (onRender) onRender(item);
+        };
+
+        Lampa.SettingsApi.addParam(data);
+    }
+
     function setupSettings() {
         Lampa.SettingsApi.addComponent({
             component: 'shikimori',
@@ -3594,8 +4020,7 @@
 
         // Версия первой строкой: единственный способ с пульта понять, какая
         // сборка реально загрузилась — плагин внедряется один раз при старте
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_version',
                 type: 'static'
@@ -3606,13 +4031,13 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_user',
                 type: 'input',
                 values: '',
-                default: ''
+                default: '',
+                placeholder: Lampa.Lang.translate('shikimori_value_no_nick')
             },
             field: {
                 name: Lampa.Lang.translate('shikimori_settings_user'),
@@ -3624,8 +4049,7 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_card_style',
                 type: 'select',
@@ -3642,8 +4066,7 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_uncensored',
                 type: 'trigger',
@@ -3655,8 +4078,7 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_kodik',
                 type: 'trigger',
@@ -3671,8 +4093,7 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_kodik_subs',
                 type: 'trigger',
@@ -3687,8 +4108,7 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_hidden_pick',
                 type: 'button'
@@ -3702,8 +4122,7 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_studios_pick',
                 type: 'button'
@@ -3717,8 +4136,7 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_kodik_host',
                 type: 'input',
@@ -3734,13 +4152,13 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_kodik_token',
                 type: 'input',
                 values: '',
-                default: ''
+                default: '',
+                placeholder: Lampa.Lang.translate('shikimori_value_builtin')
             },
             field: {
                 name: Lampa.Lang.translate('shikimori_settings_kodik_token'),
@@ -3751,13 +4169,13 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_proxy',
                 type: 'input',
                 values: '',
-                default: ''
+                default: '',
+                placeholder: Lampa.Lang.translate('shikimori_value_no_proxy')
             },
             field: {
                 name: Lampa.Lang.translate('shikimori_settings_proxy'),
@@ -3765,8 +4183,7 @@
             }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'shikimori',
+        settingsParam({
             param: {
                 name: 'shikimori_clear_cache',
                 type: 'button'
@@ -3782,7 +4199,8 @@
                 storSet('shikimori_genres_cache', null);
                 storSet('shikimori_user_id', null);
                 storSet('shikimori_kodik_eps', {});
-                storSet('shikimori_hidden', {});
+                Hidden.save({});
+                storSet('shikimori_translations', null);
                 Kodik.dropCache();
                 UserData.dropRatesCache();
                 Lampa.Noty.show(Lampa.Lang.translate('shikimori_settings_cache_cleared'));
@@ -3927,6 +4345,19 @@
             shikimori_settings_studios_descr: { ru: 'Считать серию вышедшей только когда её озвучили выбранные студии. Не выбрано — засчитывается любая озвучка', en: 'Count an episode as out only when your studios dubbed it', uk: 'Зараховувати серію лише від обраних студій' },
             shikimori_studios_any: { ru: 'Любая озвучка', en: 'Any studio', uk: 'Будь-яка озвучка' },
             shikimori_studios_loading: { ru: 'Собираем список студий…', en: 'Collecting studios…', uk: 'Збираємо список студій…' },
+            shikimori_studios_chosen: { ru: 'Выбрано', en: 'Chosen', uk: 'Обрано' },
+            shikimori_studios_none: { ru: 'Сейчас засчитывается любая озвучка', en: 'Any dub counts right now', uk: 'Зараз зараховується будь-яка озвучка' },
+            shikimori_studios_search: { ru: 'Найти студию', en: 'Find a studio', uk: 'Знайти студію' },
+            shikimori_studios_more: { ru: 'Показаны не все, осталось ещё', en: 'Not all shown, more left', uk: 'Показані не всі, лишилось ще' },
+            shikimori_studios_search_hint: { ru: 'Часть названия — список сократится', en: 'Part of the name filters the list', uk: 'Частина назви — список скоротиться' },
+            shikimori_hidden_unknown: { ru: 'Тайтл', en: 'Title', uk: 'Тайтл' },
+            shikimori_value_empty: { ru: 'Не задано', en: 'Not set', uk: 'Не задано' },
+            shikimori_value_no_nick: { ru: 'Не указан', en: 'Not set', uk: 'Не вказано' },
+            shikimori_value_builtin: { ru: 'Встроенные', en: 'Built-in', uk: 'Вбудовані' },
+            shikimori_value_no_proxy: { ru: 'Без прокси', en: 'No proxy', uk: 'Без проксі' },
+            shikimori_order_default: { ru: 'По умолчанию', en: 'Default', uk: 'За умовчанням' },
+            shikimori_genres_loading: { ru: 'Загружаем жанры…', en: 'Loading genres…', uk: 'Завантажуємо жанри…' },
+            shikimori_error_calendar: { ru: 'Календарь не загрузился', en: 'Calendar failed to load', uk: 'Календар не завантажився' },
             shikimori_settings_kodik_host: { ru: 'Адрес Kodik API', en: 'Kodik API host', uk: 'Адреса Kodik API' },
             shikimori_settings_kodik_host_descr: { ru: 'По умолчанию kodik-api.com. Менять, если домен снова переедет', en: 'Defaults to kodik-api.com. Change if the domain moves again', uk: 'За замовчуванням kodik-api.com' },
             shikimori_settings_kodik_token: { ru: 'Токен Kodik', en: 'Kodik token', uk: 'Токен Kodik' },
@@ -4017,7 +4448,11 @@
          * Отличаются бейджи только цветом:
          *   нейтральный  rgba(0,0,0,.6) + #fff   — год, маркер, оценка
          *   выделенный   #fff + #000             — тип (редкий, потому громкий)
-         *   акцентный    #5DBFF5 + #06283A       — новые серии
+         *   акцентный    #D9A21B + #2A1C00       — новые серии и прогресс
+         * Акцент раньше был голубым (#5DBFF5): на постере, который почти всегда
+         * тёмный и цветной, он терялся, а тонкая полоса прогресса на подложке
+         * rgba(0,0,0,.5) не читалась вовсе. Тёмно-жёлтый заметно контрастнее
+         * и не спорит с зелёной плашкой самой Lampa
          * Рейтинг Lampa рисует пилюлей 1.3em/радиус 1em, но на нашей карточке
          * рядом три других бейджа, и разнобой заметнее, чем расхождение с Lampa.
          *
@@ -4052,7 +4487,7 @@
             '.shikimori-card .card__marker,' +
             '.shikimori-card .shikimori-year{background:rgba(0,0,0,0.6);color:#fff}' +
             '.shikimori-card .card__type{background:#fff;color:#000}' +
-            '.shikimori-card .card__new-episode>div{background-color:#5DBFF5;color:#06283A}' +
+            '.shikimori-card .card__new-episode>div{background-color:#D9A21B;color:#2A1C00}' +
 
             /* Раскладка по углам. ВАЖНО: смещения задаются на элементе, у которого
                кегль 0.8em, поэтому в его единицах 0.6em карточки — это 0.75em.
@@ -4080,7 +4515,7 @@
             '.shikimori-card .card__view{-webkit-border-radius:1em;border-radius:1em;overflow:hidden}' +
             '.shikimori-progress{position:absolute;left:0;right:0;bottom:0;height:0.4em;' +
                 'background:rgba(0,0,0,0.5);z-index:2}' +
-            '.shikimori-progress i{display:block;height:100%;width:0;background:#5DBFF5}' +
+            '.shikimori-progress i{display:block;height:100%;width:0;background:#D9A21B}' +
             /* Нижние бейджи поднимаются над кромкой: 0.4em полосы + 0.6em зазора
                = 1em карточки, в единицах бейджа это 1.25em */
             '.shikimori-card--progress .card__vote,' +
@@ -4158,7 +4593,7 @@
             '.shikimori-week__day--empty{opacity:0.4}' +
             '.shikimori-week__name{font-size:0.9em;opacity:0.7;text-transform:uppercase}' +
             '.shikimori-week__date{font-size:1.3em;line-height:1.3}' +
-            '.shikimori-week__count{font-size:1.1em;font-weight:700;color:#5DBFF5}' +
+            '.shikimori-week__count{font-size:1.1em;font-weight:700;color:#D9A21B}' +
             '.shikimori-week__day--empty .shikimori-week__count{color:inherit;font-weight:400}' +
             '.shikimori-day{width:100%;-webkit-flex-basis:100%;-ms-flex-preferred-size:100%;flex-basis:100%;' +
                 'font-size:1.4em;margin:0 0 0.6em 0;opacity:0.75}' +
@@ -4176,7 +4611,7 @@
             '.shiki-tier--tv .shikimori-card .card__new-episode>div{font-size:0.9em}' +
 
             /* --- Счётчик на пункте меню --- */
-            '.menu__item .shikimori-badge{margin-left:auto;background:#5DBFF5;color:#06283A;font-size:0.8em;' +
+            '.menu__item .shikimori-badge{margin-left:auto;background:#D9A21B;color:#2A1C00;font-size:0.8em;' +
                 'font-weight:700;min-width:1.7em;height:1.7em;line-height:1.7em;text-align:center;' +
                 '-webkit-border-radius:1em;border-radius:1em;padding:0 0.4em;' +
                 '-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}' +
@@ -4194,7 +4629,7 @@
 
             /* --- Полная карточка --- */
             '.shikimori-rate{background:rgba(255,255,255,0.12)}' +
-            '.shikimori-next{margin-left:0.6em;color:#5DBFF5}' +
+            '.shikimori-next{margin-left:0.6em;color:#D9A21B}' +
             '</style>');
 
         $('body').append(Lampa.Template.get('shikimori_style', {}, true));
