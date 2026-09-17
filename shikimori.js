@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '3.5.0';
+    var VERSION = '3.6.0';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -53,6 +53,8 @@
     var PROGRESS_SEASON_HARD = 12;   // и дальше, если карточка знает о большем
     var PROGRESS_SEASON_PROBE = 3;   // сколько первых серий щупать, чтобы отсечь пустой сезон
     var PROGRESS_PROBE_BUDGET = 700; // потолок обращений к таймлайну на карточку
+    var POSTER_LAZY_FALLBACK = 1500;          // если событие visible не пришло — грузим постер сами
+    var AMBIENCE_KEY = 'shikimori_ambience';  // фон по карточке в фокусе
     var RETRY_MAX = 2;                        // повторов после 429/5xx
     var RETRY_DELAY = 1200;                   // пауза перед первым, дальше вдвое
     var TRANSLATIONS_TTL = 7 * 24 * 60 * 60 * 1000; // список студий Kodik: неделя
@@ -64,8 +66,11 @@
     var manifest = {
         type: 'video',
         version: VERSION,
-        name: 'Аниме Shikimori',
-        description: 'Каталог, списки и календарь аниме с Shikimori',
+        // Раздел называется по содержимому, а не по источнику данных: человеку
+        // важно «Аниме», а Shikimori — это то, откуда мы берём каталог, и
+        // упоминать его стоит только там, где он правда нужен: ник, профиль, API
+        name: 'Аниме',
+        description: 'Каталог, списки и календарь аниме',
         component: PLUGIN + '_main'
     };
 
@@ -2448,6 +2453,81 @@
      * ============================================================ */
 
     // Стиль карточек: native (как в Lampa, по умолчанию) | compact | poster
+    // Скелетон: пока данные едут, на экране уже стоит будущая раскладка.
+    // Крутилка на пустом экране не отвечает на вопрос «сколько ждать»,
+    // а решётка плиток отвечает — и экран не выглядит сломанным
+    // Приходили ли вообще события visible. Нужен для страховки ниже: если
+    // механизм слоёв в этом контейнере не работает, карточки должны показать
+    // постеры сами — но пока он работает, лезть вперёд него нельзя, иначе
+    // ленивая загрузка превращается в обычную, только с задержкой
+    var layer_alive = false;
+
+    function skeletonCard() {
+        var cell = document.createElement('div');
+        cell.className = 'card shikimori-card shikimori-skeleton';
+        cell.appendChild(document.createElement('div')).className = 'card__view';
+        cell.appendChild(document.createElement('div')).className = 'shikimori-skeleton__line';
+        return cell;
+    }
+
+    function skeletonGrid(count) {
+        var box = document.createDocumentFragment();
+        for (var i = 0; i < count; i++) box.appendChild(skeletonCard());
+        return box;
+    }
+
+    function skeletonRows(rows, per_row) {
+        var box = document.createElement('div');
+        box.className = 'shikimori-skeleton-rows';
+        for (var r = 0; r < rows; r++) {
+            var row = document.createElement('div');
+            row.className = 'shikimori-skeleton-row';
+            row.appendChild(document.createElement('div')).className = 'shikimori-skeleton__head';
+
+            var strip = document.createElement('div');
+            strip.className = 'shikimori-skeleton__strip';
+            for (var i = 0; i < per_row; i++) strip.appendChild(skeletonCard());
+            row.appendChild(strip);
+            box.appendChild(row);
+        }
+        return box;
+    }
+
+    function skeletonClear(root) {
+        if (!root) return;
+        var list = root.querySelectorAll('.shikimori-skeleton,.shikimori-skeleton-rows');
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].parentNode) list[i].parentNode.removeChild(list[i]);
+        }
+    }
+
+    // Анимации отключаются в настройках Lampa — на слабых телевизорах это
+    // делают первым делом. Класс no--animation ставит сама Lampa, и наши
+    // движения обязаны его слушаться так же, как штатные
+    function animationsOn() {
+        try {
+            return !document.body.classList.contains('no--animation');
+        }
+        catch (e) {}
+        return true;
+    }
+
+    // Фон под интерфейсом по карточке в фокусе. Именно этим витрины Netflix
+    // и Кинопоиска отличаются от плоского списка: экран реагирует на то,
+    // где вы стоите. Свой дебаунс не нужен — Lampa ждёт секунду сама,
+    // сама же молчит, если фон выключен в настройках или включён light-режим
+    function ambience(data) {
+        if (!storBool(AMBIENCE_KEY, true)) return;
+        try {
+            var url = '';
+            // Горизонтальный кадр лучше портрета: он и задуман как фон
+            if (data.backdrop_path) url = Lampa.TMDB.image('t/p/w500' + data.backdrop_path);
+            if (!url) url = cardView(data).poster;
+            if (url) Lampa.Background.change(url);
+        }
+        catch (e) {}
+    }
+
     function cardStyle() {
         var style = storString('shikimori_card_style', 'native');
         return ['native', 'compact', 'poster'].indexOf(style) >= 0 ? style : 'native';
@@ -2514,13 +2594,19 @@
             }
             this.card.querySelector('.card__promo-title').innerText = title;
 
+            // Постер — только когда карточка попала в кадр.
+            //
+            // Раньше src проставлялся при сборке, и каталог из 36 карточек
+            // разом просил 36 картинок: на телевизоре это забивает и сеть,
+            // и декодер, а видно из них штуки четыре. Штатная карточка Lampa
+            // делает ровно так же — грузит в onVisible
             var img = this.card.querySelector('.card__img');
             var fav_img = data._fav_img || '';
             img.onerror = function () {
                 if (fav_img && img.src.indexOf(fav_img) == -1) img.src = fav_img;
                 else img.src = './img/img_broken.svg';
             };
-            img.src = poster;
+            this.poster = poster;
 
             var vote = this.card.querySelector('.card__vote');
             if (score) vote.innerText = score;
@@ -2617,11 +2703,38 @@
             else marker.classList.add('hide');
         };
 
+        // Показать постер. Вызывается по событию visible, но подстраховываемся
+        // таймером: в некоторых контейнерах Lampa событие не приходит вовсе,
+        // а карточка без постера — хуже, чем лишний запрос
+        this.showPoster = function () {
+            if (this.shown || !this.card) return;
+            this.shown = true;
+            clearTimeout(this.poster_timer);
+            var img = this.card.querySelector('.card__img');
+            if (img && this.poster) img.src = this.poster;
+        };
+
         this.create = function () {
             this.build();
 
+            this.poster_timer = setTimeout(function () {
+                if (!layer_alive) self.showPoster();
+            }, POSTER_LAZY_FALLBACK);
+
             this.card.addEventListener('hover:focus', function () {
+                ambience(data);
                 if (self.onFocus) self.onFocus(self.card, data);
+            });
+
+            // Отклик на нажатие: карточка коротко проседает, как кнопка.
+            // Пульт не даёт тактильной отдачи, и без этого непонятно,
+            // засчиталось нажатие или нет
+            this.card.addEventListener('hover:enter', function () {
+                if (!animationsOn()) return;
+                self.card.classList.add('shikimori-card--press');
+                setTimeout(function () {
+                    if (self.card) self.card.classList.remove('shikimori-card--press');
+                }, 180);
             });
 
             this.card.addEventListener('hover:touch', function () {
@@ -2636,6 +2749,8 @@
             // в коллекцию Navigator: Line вешает onVisible именно на это событие,
             // и с пульта фокус упирается в последнюю изначально отрисованную карточку
             this.card.addEventListener('visible', function () {
+                layer_alive = true;
+                self.showPoster();
                 if (self.onVisible) self.onVisible(self.card, data);
             });
 
@@ -2651,6 +2766,7 @@
         };
 
         this.destroy = function () {
+            clearTimeout(this.poster_timer);
             if (this.card) {
                 var img = this.card.querySelector('.card__img');
                 if (img) { img.onerror = null; img.src = ''; }
@@ -2699,6 +2815,12 @@
         comp.create = function () {
             var self = this;
             this.activity.loader(true);
+
+            // Главная собирается из пяти источников сразу, и до их прихода
+            // экран был пустым. Показываем скелет строк — снимется он в
+            // buildLines, прямо перед отрисовкой настоящих
+            try { this.render(true).appendChild(skeletonRows(3, 6)); }
+            catch (e) {}
 
             var lines = {};
             var join = makeJoin(5, function () {
@@ -2785,6 +2907,8 @@
         };
 
         comp.buildLines = function (lines) {
+            skeletonClear(this.render(true));
+
             var data = [];
             var nick = storString('shikimori_user', '');
 
@@ -3251,6 +3375,9 @@
                 if (step > 0) Navigator.move('down');
                 else Navigator.move('up');
             };
+
+            // Пока едет первая страница, на месте сетки стоит её скелет
+            body.appendChild(skeletonGrid(object.mode == 'catalog' ? 12 : 8));
 
             if (object.open_search) {
                 // Первую загрузку запускает сама клавиатура. Иначе ответ приходит,
@@ -3792,6 +3919,7 @@
             for (var i = 0; i < items.length; i++) items[i].destroy();
             items = [];
             while (body.firstChild) body.removeChild(body.firstChild);
+            body.appendChild(skeletonGrid(12));
 
             net.clear();
             this.activity.loader(true);
@@ -3804,6 +3932,7 @@
                 if (!list.length) Lampa.Noty.show(Lampa.Lang.translate('shikimori_empty'));
             }, function (reason) {
                 if (my_id != reload_id) return;
+                skeletonClear(body);
                 self.activity.loader(false);
                 // Причину показываем прямо на экране: «просто пусто» после смены
                 // сортировки — это не ответ, а с пульта в консоль не заглянешь
@@ -3813,6 +3942,8 @@
         };
 
         this.append = function (list) {
+            skeletonClear(body);
+
             for (var i = 0; i < list.length; i++) {
                 // «Не интересует» должно работать и здесь: раньше скрытое
                 // отфильтровывалось только в личных строках на главной,
@@ -3841,9 +3972,15 @@
                     if (Lampa.Controller.own(self)) Lampa.Controller.collectionAppend(card.render(true));
                 })(list[i]);
             }
+
+            // Постеры теперь ждут события visible — просим Lampa пересчитать,
+            // что попало в кадр. Дальше это делает сама прокрутка
+            try { Lampa.Layer.visible(scroll.render(true)); }
+            catch (e) {}
         };
 
         this.ready = function (count) {
+            skeletonClear(body);
             this.updateHead();
             this.activity.loader(false);
             this.activity.toggle();
@@ -3851,6 +3988,7 @@
         };
 
         this.empty = function () {
+            skeletonClear(body);
             var empty = new Lampa.Empty();
             html.appendChild(empty.render(true));
             this.start = empty.start.bind(empty);
@@ -4068,6 +4206,18 @@
 
         settingsParam({
             param: {
+                name: AMBIENCE_KEY,
+                type: 'trigger',
+                default: true
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_ambience'),
+                description: Lampa.Lang.translate('shikimori_settings_ambience_descr')
+            }
+        });
+
+        settingsParam({
+            param: {
                 name: 'shikimori_uncensored',
                 type: 'trigger',
                 default: false
@@ -4226,7 +4376,7 @@
             shikimori_not_found: { ru: 'Не найдено в TMDB', en: 'Not found in TMDB', uk: 'Не знайдено в TMDB' },
             shikimori_pick_title: { ru: 'Выберите тайтл', en: 'Pick a title', uk: 'Оберіть тайтл' },
             shikimori_empty: { ru: 'Ничего не найдено', en: 'Nothing found', uk: 'Нічого не знайдено' },
-            shikimori_error_api: { ru: 'Ошибка Shikimori API', en: 'Shikimori API error', uk: 'Помилка Shikimori API' },
+            shikimori_error_api: { ru: 'Не удалось загрузить', en: 'Could not load', uk: 'Не вдалося завантажити' },
             shikimori_any: { ru: 'Любой', en: 'Any', uk: 'Будь-який' },
             shikimori_next_episode: { ru: 'Следующая серия', en: 'Next episode', uk: 'Наступна серія' },
 
@@ -4238,7 +4388,7 @@
 
             shikimori_group_progress: { ru: 'Прогресс просмотра', en: 'Watch progress', uk: 'Прогрес перегляду' },
             shikimori_group_tag: { ru: 'Метка в избранном Lampa', en: 'Lampa bookmark tag', uk: 'Мітка в обраному Lampa' },
-            shikimori_group_visible: { ru: 'Видимость в строках плагина', en: 'Visibility in plugin rows', uk: 'Видимість у рядках плагіна' },
+            shikimori_group_visible: { ru: 'Видимость в подборках', en: 'Visibility in rows', uk: 'Видимість у добірках' },
             shikimori_group_open: { ru: 'Переход', en: 'Navigate', uk: 'Перехід' },
             shikimori_menu_hide: { ru: 'Не интересует', en: 'Not interested', uk: 'Не цікавить' },
             shikimori_menu_unhide: { ru: 'Показывать снова', en: 'Show again', uk: 'Показувати знову' },
@@ -4323,8 +4473,10 @@
             shikimori_style_native: { ru: 'Как в Lampa', en: 'Lampa native', uk: 'Як у Lampa' },
             shikimori_style_compact: { ru: 'Компактный', en: 'Compact', uk: 'Компактний' },
             shikimori_style_poster: { ru: 'Крупные постеры', en: 'Large posters', uk: 'Великі постери' },
+            shikimori_settings_ambience: { ru: 'Фон по карточке', en: 'Ambient background', uk: 'Фон за карткою' },
+            shikimori_settings_ambience_descr: { ru: 'Фон меняется на кадр из тайтла, на котором стоит фокус. Работает, если в настройках Lampa включён фон', en: 'Background follows the focused title', uk: 'Фон змінюється за карткою у фокусі' },
             shikimori_settings_uncensored: { ru: 'Показывать 18+', en: 'Show 18+', uk: 'Показувати 18+' },
-            shikimori_settings_uncensored_descr: { ru: 'Отключает фильтр цензуры Shikimori', en: 'Disables Shikimori censorship filter', uk: 'Вимикає фільтр цензури Shikimori' },
+            shikimori_settings_uncensored_descr: { ru: 'Отключает фильтр цензуры в каталоге', en: 'Disables the catalogue censorship filter', uk: 'Вимикає фільтр цензури в каталозі' },
             shikimori_seen_all: { ru: 'Просмотрено', en: 'Watched', uk: 'Переглянуто' },
             shikimori_subtitles: { ru: 'субтитры', en: 'subtitles', uk: 'субтитри' },
             shikimori_dubbed: { ru: 'с озвучкой', en: 'dubbed', uk: 'з озвученням' },
@@ -4334,7 +4486,7 @@
             shikimori_settings_kodik_subs_descr: { ru: 'Показывать серию новой, если вышла только с субтитрами, без озвучки', en: 'Treat subtitle-only releases as new episodes', uk: 'Показувати серію новою, якщо вийшла лише із субтитрами' },
             shikimori_settings_version: { ru: 'Версия плагина', en: 'Plugin version', uk: 'Версія плагіна' },
             shikimori_settings_version_descr: { ru: 'Обновляется при перезапуске Lampa. Если версия старая — закройте приложение полностью и откройте заново', en: 'Updates when Lampa restarts', uk: 'Оновлюється під час перезапуску Lampa' },
-            shikimori_action_account: { ru: 'Аккаунт Shikimori', en: 'Shikimori account', uk: 'Обліковий запис Shikimori' },
+            shikimori_action_account: { ru: 'Мой профиль', en: 'My profile', uk: 'Мій профіль' },
 
             shikimori_nick_checking: { ru: 'Проверяем профиль…', en: 'Checking the profile…', uk: 'Перевіряємо профіль…' },
             shikimori_nick_ok: { ru: 'Нашли тайтлов:', en: 'Titles found:', uk: 'Знайдено тайтлів:' },
@@ -4521,6 +4673,64 @@
             '.shikimori-card--progress .card__vote,' +
             '.shikimori-card--progress .card__marker{bottom:1.25em}' +
 
+            /* --- Фокус: своя рамка, потому что штатная у нас не видна ---
+               Lampa рисует обводку фокуса как .card__view::after со смещением
+               -0.5em наружу. Но нам на .card__view нужен overflow:hidden —
+               им обрезается полоса прогресса по нижней кромке постера, — и он
+               же срезает эту обводку целиком: карточка в фокусе выглядела
+               ровно как соседние. Рисуем рамку внутрь бокса, там её ничто
+               не режет, и она не спорит с формой постера */
+            '.shikimori-card .card__view:before{content:"";position:absolute;top:0;left:0;right:0;bottom:0;' +
+                'border:0.25em solid transparent;-webkit-border-radius:1em;border-radius:1em;' +
+                'z-index:3;pointer-events:none;' +
+                '-webkit-transition:border-color 0.15s ease-out;transition:border-color 0.15s ease-out}' +
+            '.shikimori-card.focus .card__view:before{border-color:#fff}' +
+            '.shikimori-card.hover .card__view:before{border-color:rgba(255,255,255,0.5)}' +
+
+            /* --- Движение: карточка отзывается, а не только подсвечивается ---
+               Штатная анимация Lampa (animation-card-focus) живёт под
+               body.advanced--animation, а он включён по умолчанию только на
+               Apple TV, в браузере и на десктопе: на телевизоре карточки не
+               двигались вообще. Своё движение делаем на transform — он не
+               пересчитывает раскладку и тянется даже слабой панелью.
+               Всё под body:not(.no--animation): выключенные анимации
+               выключают и это */
+            '.shikimori-card .card__view{-webkit-transition:-webkit-transform 0.18s ease-out;' +
+                '-o-transition:-o-transform 0.18s ease-out;transition:transform 0.18s ease-out}' +
+            '.shikimori-card.focus,.shikimori-card.hover{z-index:2}' +
+            'body:not(.no--animation) .shikimori-card.focus .card__view,' +
+            'body:not(.no--animation) .shikimori-card.hover .card__view{' +
+                '-webkit-transform:scale(1.06);-ms-transform:scale(1.06);transform:scale(1.06)}' +
+            /* Нажатие: короткая просадка вместо тактильной отдачи, которой у пульта нет.
+               Селектор с .focus — чтобы перебить правило фокуса, а не спорить с ним */
+            'body:not(.no--animation) .shikimori-card--press.focus .card__view,' +
+            'body:not(.no--animation) .shikimori-card--press .card__view{' +
+                '-webkit-transform:scale(0.97);-ms-transform:scale(0.97);transform:scale(0.97)}' +
+
+            /* --- Скелетоны: будущая раскладка вместо крутилки ---
+               Пустой экран со спиннером читается как «зависло»: сколько ждать,
+               по нему не понять. Решётка плиток отвечает на этот вопрос сразу */
+            '.shikimori-skeleton .card__view{background:rgba(255,255,255,0.08);' +
+                '-webkit-border-radius:1em;border-radius:1em;overflow:hidden;position:relative}' +
+            '.shikimori-skeleton__line{height:0.8em;margin-top:0.1em;width:70%;' +
+                'background:rgba(255,255,255,0.08);-webkit-border-radius:0.4em;border-radius:0.4em}' +
+            '.shikimori-skeleton-row{margin-bottom:1.5em}' +
+            '.shikimori-skeleton__head{height:1.2em;width:12em;margin-bottom:0.6em;' +
+                'background:rgba(255,255,255,0.08);-webkit-border-radius:0.4em;border-radius:0.4em}' +
+            '.shikimori-skeleton__strip{display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;' +
+                'overflow:hidden}' +
+            '.shikimori-skeleton__strip .shikimori-skeleton{margin-right:1em;-webkit-flex-shrink:0;' +
+                '-ms-flex-negative:0;flex-shrink:0}' +
+            'body:not(.no--animation) .shikimori-skeleton .card__view:after{content:"";position:absolute;' +
+                'top:0;left:0;height:100%;width:100%;' +
+                'background:-webkit-linear-gradient(left,rgba(255,255,255,0),rgba(255,255,255,0.07),rgba(255,255,255,0));' +
+                'background:linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,0.07),rgba(255,255,255,0));' +
+                '-webkit-animation:shikimori-shimmer 1.3s infinite;animation:shikimori-shimmer 1.3s infinite}' +
+            '@-webkit-keyframes shikimori-shimmer{0%{-webkit-transform:translate3d(-100%,0,0)}' +
+                '100%{-webkit-transform:translate3d(100%,0,0)}}' +
+            '@keyframes shikimori-shimmer{0%{transform:translate3d(-100%,0,0)}' +
+                '100%{transform:translate3d(100%,0,0)}}' +
+
             /* --- Варианты плотности --- */
             '.shikimori-card--compact{width:9.5em}' +
             '.shikimori-card--compact .card__title{font-size:1.05em;-webkit-line-clamp:1;line-clamp:1;height:1.4em}' +
@@ -4604,11 +4814,16 @@
             '.shiki-tier--phone .shikimori-card .shikimori-year,' +
             '.shiki-tier--phone .shikimori-card .card__new-episode>div{font-size:0.95em}' +
             '.shiki-tier--phone .shikimori-progress{height:0.4em}' +
+            /* Телевизор смотрят с трёх метров: мелкий бейдж там не читается.
+               Раньше на ТВ-тире кегль наоборот уменьшался до 0.9em — чинить
+               это важнее, чем экономить место на постере */
             '.shiki-tier--tv .shikimori-card .card__vote,' +
             '.shiki-tier--tv .shikimori-card .card__type,' +
             '.shiki-tier--tv .shikimori-card .card__marker,' +
             '.shiki-tier--tv .shikimori-card .shikimori-year,' +
-            '.shiki-tier--tv .shikimori-card .card__new-episode>div{font-size:0.9em}' +
+            '.shiki-tier--tv .shikimori-card .card__new-episode>div{font-size:1em}' +
+            '.shiki-tier--tv .shikimori-card .card__title{font-size:1.1em;height:2.6em}' +
+            '.shiki-tier--tv .shikimori-day{font-size:1.5em}' +
 
             /* --- Счётчик на пункте меню --- */
             '.menu__item .shikimori-badge{margin-left:auto;background:#D9A21B;color:#2A1C00;font-size:0.8em;' +
