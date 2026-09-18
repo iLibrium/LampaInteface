@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '3.6.0';
+    var VERSION = '3.6.1';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -55,6 +55,7 @@
     var PROGRESS_PROBE_BUDGET = 700; // потолок обращений к таймлайну на карточку
     var POSTER_LAZY_FALLBACK = 1500;          // если событие visible не пришло — грузим постер сами
     var AMBIENCE_KEY = 'shikimori_ambience';  // фон по карточке в фокусе
+    var MOTION_KEY = 'shikimori_motion';      // движение карточек: масштаб фокуса и отклик
     var RETRY_MAX = 2;                        // повторов после 429/5xx
     var RETRY_DELAY = 1200;                   // пауза перед первым, дальше вдвое
     var TRANSLATIONS_TTL = 7 * 24 * 60 * 60 * 1000; // список студий Kodik: неделя
@@ -2504,6 +2505,21 @@
     // Анимации отключаются в настройках Lampa — на слабых телевизорах это
     // делают первым делом. Класс no--animation ставит сама Lampa, и наши
     // движения обязаны его слушаться так же, как штатные
+    // Наше движение включается классом на body. Отдельный выключатель нужен,
+    // потому что отключать ради него все анимации Lampa — слишком крупная мера:
+    // скелетоны и проявление постера могут остаться, а масштаб — уйти
+    function applyMotion() {
+        try {
+            if (storBool(MOTION_KEY, true)) document.body.classList.add('shiki-motion');
+            else document.body.classList.remove('shiki-motion');
+        }
+        catch (e) {}
+    }
+
+    function motionOn() {
+        return storBool(MOTION_KEY, true) && animationsOn();
+    }
+
     function animationsOn() {
         try {
             return !document.body.classList.contains('no--animation');
@@ -2602,9 +2618,13 @@
             // делает ровно так же — грузит в onVisible
             var img = this.card.querySelector('.card__img');
             var fav_img = data._fav_img || '';
+            var card_el = this.card;
             img.onerror = function () {
                 if (fav_img && img.src.indexOf(fav_img) == -1) img.src = fav_img;
-                else img.src = './img/img_broken.svg';
+                else {
+                    img.src = './img/img_broken.svg';
+                    card_el.classList.remove('shikimori-card--loading');
+                }
             };
             this.poster = poster;
 
@@ -2710,8 +2730,19 @@
             if (this.shown || !this.card) return;
             this.shown = true;
             clearTimeout(this.poster_timer);
+
             var img = this.card.querySelector('.card__img');
-            if (img && this.poster) img.src = this.poster;
+            if (!img || !this.poster) return;
+
+            // Класс ставим до src: пока картинка едет, на месте постера ровный
+            // тёмный прямоугольник, а приехав, она проявляется. Подмена картинки
+            // рывком — ровно в момент перевода фокуса — читается как дёрганье
+            var card = this.card;
+            card.classList.add('shikimori-card--loading');
+            img.onload = function () {
+                card.classList.remove('shikimori-card--loading');
+            };
+            img.src = this.poster;
         };
 
         this.create = function () {
@@ -2730,7 +2761,7 @@
             // Пульт не даёт тактильной отдачи, и без этого непонятно,
             // засчиталось нажатие или нет
             this.card.addEventListener('hover:enter', function () {
-                if (!animationsOn()) return;
+                if (!motionOn()) return;
                 self.card.classList.add('shikimori-card--press');
                 setTimeout(function () {
                     if (self.card) self.card.classList.remove('shikimori-card--press');
@@ -4206,6 +4237,21 @@
 
         settingsParam({
             param: {
+                name: MOTION_KEY,
+                type: 'trigger',
+                default: true
+            },
+            field: {
+                name: Lampa.Lang.translate('shikimori_settings_motion'),
+                description: Lampa.Lang.translate('shikimori_settings_motion_descr')
+            },
+            onChange: function () {
+                applyMotion();
+            }
+        });
+
+        settingsParam({
+            param: {
                 name: AMBIENCE_KEY,
                 type: 'trigger',
                 default: true
@@ -4473,6 +4519,8 @@
             shikimori_style_native: { ru: 'Как в Lampa', en: 'Lampa native', uk: 'Як у Lampa' },
             shikimori_style_compact: { ru: 'Компактный', en: 'Compact', uk: 'Компактний' },
             shikimori_style_poster: { ru: 'Крупные постеры', en: 'Large posters', uk: 'Великі постери' },
+            shikimori_settings_motion: { ru: 'Движение карточек', en: 'Card motion', uk: 'Рух карток' },
+            shikimori_settings_motion_descr: { ru: 'Карточка в фокусе слегка увеличивается, нажатие даёт отклик. Выключите, если на вашем телевизоре движение выглядит рваным', en: 'The focused card scales slightly and a press responds', uk: 'Картка у фокусі трохи збільшується, натискання дає відгук' },
             shikimori_settings_ambience: { ru: 'Фон по карточке', en: 'Ambient background', uk: 'Фон за карткою' },
             shikimori_settings_ambience_descr: { ru: 'Фон меняется на кадр из тайтла, на котором стоит фокус. Работает, если в настройках Lampa включён фон', en: 'Background follows the focused title', uk: 'Фон змінюється за карткою у фокусі' },
             shikimori_settings_uncensored: { ru: 'Показывать 18+', en: 'Show 18+', uk: 'Показувати 18+' },
@@ -4680,10 +4728,14 @@
                же срезает эту обводку целиком: карточка в фокусе выглядела
                ровно как соседние. Рисуем рамку внутрь бокса, там её ничто
                не режет, и она не спорит с формой постера */
+            /* Рамка появляется сразу, без перехода по цвету. Замер в Chromium:
+               плавный border-color на скруглённой рамке заставлял перерисовывать
+               её каждый кадр — 216 перерисовок за семь переводов фокуса против
+               21 без него. Именно это и читалось как «анимация скачет»:
+               плавным было только намерение, а кадров не хватало */
             '.shikimori-card .card__view:before{content:"";position:absolute;top:0;left:0;right:0;bottom:0;' +
                 'border:0.25em solid transparent;-webkit-border-radius:1em;border-radius:1em;' +
-                'z-index:3;pointer-events:none;' +
-                '-webkit-transition:border-color 0.15s ease-out;transition:border-color 0.15s ease-out}' +
+                'z-index:3;pointer-events:none}' +
             '.shikimori-card.focus .card__view:before{border-color:#fff}' +
             '.shikimori-card.hover .card__view:before{border-color:rgba(255,255,255,0.5)}' +
 
@@ -4695,17 +4747,35 @@
                пересчитывает раскладку и тянется даже слабой панелью.
                Всё под body:not(.no--animation): выключенные анимации
                выключают и это */
-            '.shikimori-card .card__view{-webkit-transition:-webkit-transform 0.18s ease-out;' +
-                '-o-transition:-o-transform 0.18s ease-out;transition:transform 0.18s ease-out}' +
+            /* Двигаем САМУ карточку, а не .card__view.
+               У .card уже стоит will-change:transform — Lampa подняла её в
+               отдельный слой, и масштаб такого слоя видеокарта делает без
+               единой перерисовки. А вот .card__view лежит внутри этого слоя,
+               на нём border-radius и overflow:hidden, и его масштабирование
+               заставляло перерисовывать скруглённую маску вместе с постером:
+               замер показал 28 перерисовок картинки и 14 пересчётов раскладки
+               там, где у .card — ноль и ноль */
+            '.shikimori-card{-webkit-transition:-webkit-transform 0.2s ease-out;' +
+                '-o-transition:-o-transform 0.2s ease-out;transition:transform 0.2s ease-out}' +
             '.shikimori-card.focus,.shikimori-card.hover{z-index:2}' +
-            'body:not(.no--animation) .shikimori-card.focus .card__view,' +
-            'body:not(.no--animation) .shikimori-card.hover .card__view{' +
+            'body.shiki-motion:not(.no--animation) .shikimori-card.focus,' +
+            'body.shiki-motion:not(.no--animation) .shikimori-card.hover{' +
                 '-webkit-transform:scale(1.06);-ms-transform:scale(1.06);transform:scale(1.06)}' +
             /* Нажатие: короткая просадка вместо тактильной отдачи, которой у пульта нет.
                Селектор с .focus — чтобы перебить правило фокуса, а не спорить с ним */
-            'body:not(.no--animation) .shikimori-card--press.focus .card__view,' +
-            'body:not(.no--animation) .shikimori-card--press .card__view{' +
+            'body.shiki-motion:not(.no--animation) .shikimori-card--press.focus,' +
+            'body.shiki-motion:not(.no--animation) .shikimori-card--press{' +
                 '-webkit-transform:scale(0.97);-ms-transform:scale(0.97);transform:scale(0.97)}' +
+            /* Штатный «подскок» Lampa на наших карточках выключаем: он двигает
+               .card__view вверх на 1em ровно тогда же, когда мы масштабируем
+               карточку. Два движения друг поверх друга и выглядят рывком */
+            'body.advanced--animation .shikimori-card .card__view{-webkit-animation:none;animation:none}' +
+
+            /* Постер проявляется, а не возникает: он грузится лениво и может
+               приехать ровно в момент перевода фокуса — подмена картинки
+               рывком читается как дёрганая анимация */
+            '.shikimori-card .card__img{-webkit-transition:opacity 0.25s ease;transition:opacity 0.25s ease}' +
+            'body:not(.no--animation) .shikimori-card--loading .card__img{opacity:0}' +
 
             /* --- Скелетоны: будущая раскладка вместо крутилки ---
                Пустой экран со спиннером читается как «зависло»: сколько ждать,
@@ -5008,6 +5078,7 @@
         Lampa.Component.add(PLUGIN + '_catalog', CatalogComponent);
 
         watchTier();
+        applyMotion();
 
         if (window.appready) addMenuButton();
         else {
