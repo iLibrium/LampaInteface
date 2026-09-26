@@ -269,3 +269,23 @@ On miss: fall back to Lampa's own TMDB search screen prefilled with the best tit
 search fails (sequels named "X 2nd Season", franchises where every season shares one TMDB show,
 OVAs mapped to specials S0). Title search alone (the jellyfin-shikimori approach) is only acceptable
 as a last resort with the scoring above.
+
+---
+
+## 6. Уточнения 2026-09-26 (по исходникам ARM, v3.7.0 плагина)
+
+Проверено по коду `BeeeQueue/arm-server` (`src/update.ts`, `src/db/db.ts`, `src/routes/v2/`):
+
+- `media` в ответе ARM — это `type` записи Fribb, то есть **тип MAL/AniDB** (`TV`, `MOVIE`, `OVA`,
+  `ONA`, `SPECIAL`, `UNKNOWN`), а не вид записи TMDB.
+- `themoviedb` собирается как `themoviedb_id.tv ?? themoviedb_id.movie[0]`: был ли это сериал или
+  фильм, в ответе не остаётся. Однозначно только два случая: задан `themoviedb-season` (сезон бывает
+  лишь у сериала) и `media` равен `TV` или `MOVIE`. Для OVA/ONA/спешлов без сезона вид приходится
+  проверять запросом `tv/{id}` и `movie/{id}` к TMDB и смотреть, какая карточка похожа на тайтл.
+- `GET /api/v2/themoviedb?id=` ищет по одному числу: номера фильмов и сериалов в TMDB пересекаются,
+  поэтому для закладки-сериала из ответа отбрасываются записи, которые по данным ARM не сериал.
+- Батч `POST /api/v2/ids` принимает до 100 элементов, промахи — `null` на своём месте.
+
+Поиск TMDB (§3, §5) в плагине теперь идёт **без** `first_air_date_year`: для второго сезона год
+Shikimori — год сезона, а `first_air_date` сериала в TMDB — год первого сезона, и фильтр отсекал
+правильный ответ. Год учитывается в оценке: для сиквела сериал обязан начаться не позже сезона.
