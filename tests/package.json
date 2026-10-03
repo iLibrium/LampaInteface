@@ -1,0 +1,23 @@
+{
+  "name": "shikimori-plugin-tests",
+  "private": true,
+  "description": "Проверки плагина «Аниме»: эмулятор Lampa на jsdom и настоящая Lampa в Chromium",
+  "scripts": {
+    "setup": "node setup.js",
+    "test": "node run.js",
+    "es5": "acorn --ecma5 --silent ../shikimori.js",
+    "lint": "eslint --no-eslintrc -c eslint.json ../shikimori.js",
+    "check": "npm run es5 && npm run lint && npm test",
+    "e2e": "node e2e.js && node e2e_focus.js && node e2e_k.js && node e2e_drop.js && node e2e_mark.js plugin",
+    "matrix": "node matrix.js",
+    "complexity": "node complexity.js",
+    "titles": "node titles_test.js"
+  },
+  "dependencies": {
+    "acorn": "^8.18.0",
+    "eslint": "^8.57.1",
+    "jquery": "^3.7.1",
+    "jsdom": "^24.1.3",
+    "playwright-core": "1.56"
+  }
+}
