@@ -1779,7 +1779,9 @@
         // разные балансеры пишут то original_name, то original_title, поэтому
         // проверяем оба и берём максимум. Раньше перебор шёл только по сериям
         // старше 24-й, и обычный случай «досмотрел 12 из 12» не находился вовсе
-        lastWatched: function (card, max_ep) {
+        // only_season — смотреть только этот сезон TMDB: у карточки одного
+        // сезона прогресс по соседнему был бы чужим
+        lastWatched: function (card, max_ep, only_season) {
             var names = [];
             // Первым — original_name полной карточки TMDB: именно им Lampa
             // подписывает отметки в списке серий, и он бьёт имя из закладки
@@ -1806,6 +1808,7 @@
                     var ep_num = parseInt(filed.episode, 10) || 0;
                     var se_num = parseInt(filed.season, 10) || 1;
                     if (!ep_num) continue;
+                    if (only_season && se_num != only_season) continue;
                     if (se_num > season || (se_num == season && ep_num > episode)) {
                         season = se_num;
                         episode = ep_num;
@@ -1837,6 +1840,8 @@
             var max_season = parseInt(card.number_of_seasons, 10) || 0;
             if (max_season < PROGRESS_SEASON_MAX) max_season = PROGRESS_SEASON_MAX;
             if (max_season > PROGRESS_SEASON_HARD) max_season = PROGRESS_SEASON_HARD;
+            var min_season = 1;
+            if (only_season) max_season = min_season = only_season;
 
             var budget = PROGRESS_PROBE_BUDGET;
 
@@ -1851,7 +1856,7 @@
             }
 
             try {
-                for (var se = max_season; se >= 1 && budget > 0; se--) {
+                for (var se = max_season; se >= min_season && budget > 0; se--) {
                     // Сезонов перебираем много, а смотрели обычно один. Чтобы не
                     // гонять полный обход по пустым сезонам, сначала щупаем первые
                     // серии: не отмечена ни одна — сезон не начинали
@@ -1885,6 +1890,24 @@
             if (!season) season = 1;
 
             return episode ? { episode: episode, season: season, at: at || 0 } : null;
+        },
+
+        // Отметки Lampa у тайтла Shikimori. Lampa пишет их, когда серию
+        // отмечают в списке серий или досматривают, — по original_name полной
+        // карточки TMDB и номеру сезона TMDB. У карточки Shikimori нет ни
+        // того ни другого, поэтому отмеченное в Lampa плагин у тайтлов из
+        // списка Shikimori и лент не видел никогда. Берём их из сопоставления
+        // и запомненной карточки TMDB
+        ofShiki: function (sid, total) {
+            var hit = sid ? Match.cacheGet(sid) : null;
+            if (!hit || hit.none || !hit.tmdb) return null;
+            var info = TmdbInfo.get(hit.tmdb);
+            if (!info || !info.original_name) return null;
+            var mark = this.lastWatched({ _tmdb_name: info.original_name }, total, hit.season || 0);
+            // Отмечено больше, чем вышло, — нумерация TMDB сквозная через
+            // сезоны и с нашей не совпадает: такой отметке не верим
+            if (mark && total && mark.episode > total) return null;
+            return mark;
         }
     };
 
@@ -2183,6 +2206,38 @@
             }
 
             step();
+        },
+
+        // Полная карточка TMDB открылась — имя для отметок известно без запроса
+        remember: function (movie) {
+            var name = movie && (movie.original_name || movie.original_title);
+            if (!movie || !movie.id || !name) return;
+            var have = this.get(movie.id);
+            if (have && have.original_name == name) return;
+            this.load()['i' + movie.id] = {
+                v: 2,
+                original_name: name,
+                year: (movie.first_air_date || movie.release_date || '').slice(0, 4),
+                score: movie.vote_average || 0
+            };
+            this.save();
+        },
+
+        // Сопоставленные тайтлы Shikimori: дозапрашиваем имена TMDB, по
+        // которым Lampa пишет отметки. Один раз на тайтл, в фоне
+        names: function (sids) {
+            var self = this;
+            if (!sids.length) return;
+            Match.batch(background_net, sids, function (map) {
+                var cards = [];
+                for (var k in map) {
+                    var hit = map[k];
+                    if (!hit || !hit.tmdb) continue;
+                    // У сериала Lampa кладёт name — по нему fill выбирает tv
+                    cards.push(hit.media == 'movie' ? { id: hit.tmdb } : { id: hit.tmdb, name: '-' });
+                }
+                if (cards.length) self.fill(background_net, cards, function () {});
+            });
         },
 
         // Переносим добранное на карточку
@@ -3064,6 +3119,15 @@
                 Kodik.feed(net, gotFeed, function () { gotFeed([]); });
             }
 
+            // Имена TMDB для списков Shikimori — чтобы видеть отмеченное в Lampa.
+            // Экран их не ждёт: что не успело, учтётся при следующем показе
+            var watch_sids = [];
+            for (var w = 0; w < watching.length; w++) {
+                var wsid = parseInt(watching[w].malId || watching[w].id, 10);
+                if (wsid) watch_sids.push(wsid);
+            }
+            TmdbInfo.names(watch_sids);
+
             function gotFeed(rows) {
                 feed_rows = rows || [];
                 if (feed_wait) {
@@ -3384,9 +3448,11 @@
                     var info = known['s' + sid];
                     if (info && !info.ep) info = null;
                     var rate = mals[sid];
-                    var seen = Math.max(rate ? (rate.episodes || 0) : 0, Seen.get(sid));
                     var status = rate ? rate.status : '';
                     var have = info ? countAvailable(info, anime.episodesAired) : (anime.episodesAired || 0);
+                    // Серии, отмеченные в самой Lampa, — тоже просмотр
+                    var in_lampa = Progress.ofShiki(sid, have);
+                    var seen = Math.max(rate ? (rate.episodes || 0) : 0, Seen.get(sid), in_lampa ? in_lampa.episode : 0);
 
                     // Списки Shikimori кормят «Новые серии», но в строки закладок
                     // не попадают: там строго то, что лежит в избранном Lampa
@@ -3775,6 +3841,10 @@
                     parseInt(data.number_of_episodes, 10) || 0;
 
                 var mark = Progress.lastWatched(data, total);
+                if (!isTmdbCard(data)) {
+                    var in_lampa = Progress.ofShiki(sid, total);
+                    if (in_lampa && (!mark || in_lampa.episode > mark.episode)) mark = in_lampa;
+                }
                 var seen_here = Seen.get(cardSid(data));
                 if (seen_here && (!mark || seen_here > mark.episode)) mark = { episode: seen_here, season: 1, at: 0 };
                 if (mark) {
@@ -4422,7 +4492,8 @@
             var id = parseInt(card.malId || card.id, 10);
             if (id && ids.indexOf(id) < 0) ids.push(id);
         }
-        if (ids.length) Match.batch(background_net, ids, function () {});
+        // Заодно — имена TMDB: по ним видны отметки серий, сделанные в Lampa
+        if (ids.length) TmdbInfo.names(ids);
     }
 
     function openAnime(card) {
@@ -5233,6 +5304,8 @@
 
                 var source = e.object.source || movie.source;
                 if (source && source != 'tmdb' && source != 'cub') return;
+
+                TmdbInfo.remember(movie);
 
                 var render = e.object.activity.render();
                 var method = e.object.method || (movie.first_air_date || movie.number_of_seasons ? 'tv' : 'movie');
