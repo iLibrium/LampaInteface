@@ -1,6 +1,6 @@
 ---
 name: season-logic-reviewer
-description: Проверяет изменения в логике прогресса и «Новых серий» плагина shikimori.js — сопоставление отметок Lampa, сезонов Shikimori и сезонов TMDB (Progress, Seasons, placeSeason/pickPlace, UserData.tracked, isFresh). Использовать для любой правки, которая меняет, что считается просмотренным или новым.
+description: Проверяет изменения в логике прогресса и «Новых серий» плагина shikimori.js — сопоставление отметок Lampa, сезонов Shikimori и сезонов TMDB (Progress, Seasons, placeSeason, decide, UserData.tracked, isFresh). Использовать для любой правки, которая меняет, что считается просмотренным или новым.
 tools: Read, Grep, Glob, Bash
 ---
 

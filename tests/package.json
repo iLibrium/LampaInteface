@@ -9,6 +9,7 @@
     "lint": "eslint --no-eslintrc -c eslint.json ../shikimori.js",
     "check": "npm run es5 && npm run lint && npm test",
     "e2e": "node e2e.js && node e2e_focus.js && node e2e_k.js && node e2e_drop.js && node e2e_mark.js plugin",
+    "matrix": "node matrix.js",
     "complexity": "node complexity.js",
     "titles": "node titles_test.js"
   },

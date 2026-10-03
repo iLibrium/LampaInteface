@@ -1299,6 +1299,754 @@ scenarios.b4_ona_unknown_media = async function (S) {
     check(S, 'ONA with 3 of 3 watched in Lampa → not in «Новые серии»', !hit, hit);
 };
 
+/* ==================================================================
+ * ADV. Adversarial scenarios (agent C) for 3.7.3 season mapping of
+ *      «Новые серии». Each check prints "ACT <scenario> :: <label> =>"
+ *      with the actual outcome so both versions can be compared.
+ * ================================================================== */
+const ADV_TOKEN = '56a768d08f43091901c44b54fe970049';
+const ADV_VOICE = { id: 610, title: 'AniLibria.TV', type: 'voice' };
+const ADV_TMDB_DOWN = { tmdb_blocked: true, cub_dead: true, tmdb_proxy_dead: true };
+
+// parts: [{ id, name, russian, japanese, kind, status, episodes, aired, date,
+//           arm: number|null (in ARM with that season / without season), noArm: true (absent from ARM),
+//           dub: last dubbed episode (Kodik), hot: true (dub updated hours ago), next: [ids] (sequels) }]
+function advWorld(now, o) {
+    const parts = o.parts;
+    const byId = {};
+    parts.forEach(p => { byId[p.id] = p; });
+    const seq = {};
+    parts.forEach((p, i) => {
+        const next = p.next !== undefined ? p.next : (i + 1 < parts.length ? [parts[i + 1].id] : []);
+        seq[p.id] = next;
+    });
+    const pre = {};
+    for (const id in seq) for (const n of seq[id]) (pre[n] = pre[n] || []).push(Number(id));
+    const animes = parts.map(p => anime({
+        id: p.id, name: p.name, russian: p.russian || p.name, japanese: p.japanese || null,
+        english: p.english || null, kind: p.kind || 'tv', status: p.status || 'released',
+        episodes: p.episodes, episodesAired: p.aired != null ? p.aired : p.episodes,
+        airedOn: { year: Number(p.date.slice(0, 4)), date: p.date },
+        season: p.status == 'ongoing' ? 'fall_2026' : null,
+        related: (seq[p.id] || []).map(n => ({ relationKind: 'sequel', relationText: 'Sequel',
+            anime: { id: n, name: byId[n].name, kind: byId[n].kind || 'tv', status: byId[n].status || 'released' } }))
+            .concat((pre[p.id] || []).map(n => ({ relationKind: 'prequel', relationText: 'Prequel',
+                anime: { id: n, name: byId[n].name, kind: byId[n].kind || 'tv', status: byId[n].status || 'released' } })))
+    }));
+    const arm = parts.filter(p => !p.noArm).map(p => ({ myanimelist: p.id, themoviedb: o.tmdb.id,
+        media: p.media || 'TV', 'themoviedb-season': p.arm === undefined ? null : p.arm }));
+    const kodik = parts.filter(p => p.dub).map(p => p.hot
+        ? { shikimori_id: p.id, translation: ADV_VOICE, last_episode: p.dub, updated_at: iso(now - (p.dubAgoH || 5) * HOUR),
+            episodes_aired: p.aired != null ? p.aired : p.episodes, anime_status: p.status || 'ongoing' }
+        : { shikimori_id: p.id, translation: ADV_VOICE, last_episode: p.dub, updated_at: iso(now - 300 * DAY),
+            episodes_aired: p.episodes, anime_status: 'released' });
+    const t = o.tmdb;
+    const tmdb = [{ type: 'tv', id: t.id, name_ru: t.name_ru, name_en: t.name_en, original_name: t.original_name,
+        date: t.date, seasons: (t.seasonList || []).filter(s => s.season_number > 0).length || 1, alt: t.alt || [],
+        popularity: 100, seasonList: t.seasonList }];
+    return Object.assign({ animes, arm, tmdb, kodikTokens: [ADV_TOKEN], kodik }, o.extra || {});
+}
+
+function advBook(t, seasons) {
+    return { id: t.id, name: t.name_ru, original_name: t.original_name, first_air_date: t.date, genre_ids: [16],
+        original_language: 'ja', origin_country: ['JP'], source: 'tmdb', number_of_seasons: seasons || 1 };
+}
+
+// spec: [[season, from, to], ...] in Lampa numbering
+function advMarks(name, spec) {
+    const { hash } = require('./lampa');
+    const t = {};
+    for (const [s, from, to] of spec) for (let ep = from; ep <= to; ep++) t[hash([s, s > 10 ? ':' : '', ep, name].join(''))] = 100;
+    return t;
+}
+
+function advFlags(spec, down) {
+    if (down) spec.flags = Object.assign({}, spec.flags || {}, ADV_TMDB_DOWN);
+    return spec;
+}
+
+function advDesc(hit) {
+    if (!hit) return 'absent';
+    return 'present +' + (hit.new || 0) + ' (w=' + hit.w + ' t=' + hit.t + ')';
+}
+
+// exp: { present: false } | { present: true, n }
+function advCheck(S, label, hit, exp) {
+    const ok = exp.present ? (!!hit && (hit.new || 0) == exp.n) : !hit;
+    const want = exp.present ? 'present +' + exp.n : 'absent';
+    console.log('ACT ' + S + ' :: ' + label + ' => ' + advDesc(hit) + ' | expected ' + want);
+    check(S, label + ' → expected ' + want, ok, advDesc(hit));
+}
+
+async function advBookmarkRun(spec, book, timeline, extraStorage) {
+    const env = createEnv({ route: makeWorld(spec).route, favorites: { book: [book] }, timeline,
+        storage: extraStorage || {} });
+    env.load(FILE);
+    const { built } = await openMain(env);
+    await env.idle();
+    return { env, built };
+}
+
+async function advListRun(spec, timeline, extraStorage) {
+    return twoLoads(spec, { storage: Object.assign({ shikimori_user: 'me' }, extraStorage || {}), timeline });
+}
+
+const ADV_USER = { user: { id: 42, nickname: 'me' } };
+
+/* ---------------- Oshi no Ko: ARM 1/1/1 (absolute), TMDB per season ---------------- */
+const OSHI = '【推しの子】';
+const OSHI_TMDB = { id: 203737, name_ru: 'Звёздное дитя', name_en: '[Oshi No Ko]', original_name: OSHI, date: '2023-04-12',
+    alt: ['Oshi no Ko'],
+    seasonList: [{ season_number: 1, episode_count: 11, air_date: '2023-04-12', name: 'Сезон 1' },
+                 { season_number: 2, episode_count: 13, air_date: '2024-07-03', name: 'Сезон 2' },
+                 { season_number: 3, episode_count: 11, air_date: '2026-08-19', name: 'Сезон 3' }] };
+function oshiWorld(now, o) {
+    o = o || {};
+    const s3 = { id: 60058, name: '"Oshi no Ko" 3rd Season', russian: 'Звёздное дитя 3', japanese: OSHI + ' 第3期', status: 'ongoing',
+        episodes: 11, aired: 7, date: '2026-08-19', arm: 1, dub: 7, hot: true };
+    if (o.s3NoArm) s3.noArm = true;
+    return advWorld(now, { tmdb: OSHI_TMDB, extra: o.extra, parts: [
+        { id: 52034, name: '"Oshi no Ko"', russian: 'Звёздное дитя', japanese: OSHI, episodes: 11, date: '2023-04-12', arm: 1, dub: 11 },
+        { id: 55791, name: '"Oshi no Ko" 2nd Season', russian: 'Звёздное дитя 2', japanese: OSHI + ' 第2期', episodes: 13, date: '2024-07-03', arm: 1, dub: 13 },
+        s3] });
+}
+const OSHI_MID3 = [[1, 1, 11], [2, 1, 13], [3, 1, 5]];
+const OSHI_DONE2 = [[1, 1, 11], [2, 1, 13]];
+const OSHI_ON1 = [[1, 1, 6]];
+
+async function advOshiBook(S, down, s3NoArm) {
+    const now = Date.now();
+    const cases = [['mid S3 (S3E1-5), dub 7', OSHI_MID3, { present: true, n: 2 }],
+                   ['finished S2, S3 not started', OSHI_DONE2, { present: true, n: 7 }],
+                   ['stopped at S1E6', OSHI_ON1, { present: true, n: 7 }]];
+    for (const [label, marks, exp] of cases) {
+        const spec = advFlags(oshiWorld(now, { s3NoArm }), down);
+        const { env, built } = await advBookmarkRun(spec, advBook(OSHI_TMDB, 3), advMarks(OSHI, marks));
+        advCheck(S, label, freshOf(env, built, ['203737', '60058']), exp);
+    }
+}
+scenarios.adv_oshi_book_tmdb_up = S => advOshiBook(S, false, false);
+scenarios.adv_oshi_book_tmdb_down = S => advOshiBook(S, true, false);
+scenarios.adv_oshi_book_s3_not_in_arm_tmdb_up = S => advOshiBook(S, false, true);
+scenarios.adv_oshi_book_s3_not_in_arm_tmdb_down = S => advOshiBook(S, true, true);
+
+async function advOshiList(S, down) {
+    const now = Date.now();
+    const cases = [['mid S3 (S3E1-5), dub 7', OSHI_MID3, { present: true, n: 2 }],
+                   ['finished S2, S3 not started', OSHI_DONE2, { present: true, n: 7 }]];
+    for (const [label, marks, exp] of cases) {
+        const spec = advFlags(oshiWorld(now, { extra: Object.assign({ rates: [{ id: 1, target_id: 60058, status: 'watching', episodes: 0 }] }, ADV_USER) }), down);
+        // TMDB down: the TMDB name was learnt earlier (e.g. the card was opened once)
+        const st = down ? { shikimori_tmdb_info: { i203737: { v: 2, t: 'tv', original_name: OSHI, year: '2023', score: 8 } } } : {};
+        const r = await advListRun(spec, advMarks(OSHI, marks), st);
+        advCheck(S, label, freshOf(r.env, r.built, ['60058', '203737']), exp);
+    }
+}
+scenarios.adv_oshi_list_tmdb_up = S => advOshiList(S, false);
+scenarios.adv_oshi_list_tmdb_down = S => advOshiList(S, true);
+
+/* ---------------- Mushoku Tensei: ARM 1,1,2,2,3; TMDB S1=23 (P1+P2), S2=24, S3 ---------------- */
+const MT = '無職転生 ～異世界行ったら本気だす～';
+const MT_TMDB = { id: 94664, name_ru: 'Реинкарнация безработного', name_en: 'Mushoku Tensei: Jobless Reincarnation', original_name: MT,
+    date: '2021-01-11', alt: ['Mushoku Tensei'],
+    seasonList: [{ season_number: 1, episode_count: 23, air_date: '2021-01-11', name: 'Сезон 1' },
+                 { season_number: 2, episode_count: 24, air_date: '2023-07-03', name: 'Сезон 2' },
+                 { season_number: 3, episode_count: 12, air_date: '2026-08-24', name: 'Сезон 3' }] };
+function mtWorld(now, o) {
+    o = o || {};
+    const parts = [
+        { id: 39535, name: 'Mushoku Tensei: Isekai Ittara Honki Dasu', russian: 'Реинкарнация безработного', japanese: MT, episodes: 11, date: '2021-01-11', arm: 1, dub: 11 },
+        { id: 45576, name: 'Mushoku Tensei: Isekai Ittara Honki Dasu Part 2', russian: 'Реинкарнация безработного. Часть 2', episodes: 12, date: '2021-10-04', arm: 1, dub: 12 },
+        { id: 51179, name: 'Mushoku Tensei II: Isekai Ittara Honki Dasu', russian: 'Реинкарнация безработного 2', episodes: 12, date: '2023-07-03', arm: 2, dub: 12 },
+        { id: 55888, name: 'Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2', russian: 'Реинкарнация безработного 2. Часть 2', episodes: 12, date: '2024-04-08', arm: 2, dub: 12 },
+        { id: 59193, name: 'Mushoku Tensei III: Isekai Ittara Honki Dasu', russian: 'Реинкарнация безработного 3', status: 'ongoing', episodes: 12, aired: 6, date: '2026-08-24', arm: 3, dub: 6, hot: true }
+    ];
+    if (o.s3NoArm) parts[4].noArm = true;
+    return advWorld(now, { tmdb: MT_TMDB, parts, extra: o.extra });
+}
+async function advMtBook(S, down, s3NoArm) {
+    const now = Date.now();
+    const cases = [['mid S3 (S3E1-4), dub 6', [[1, 1, 23], [2, 1, 24], [3, 1, 4]], { present: true, n: 2 }],
+                   ['finished S2, S3 not started', [[1, 1, 23], [2, 1, 24]], { present: true, n: 6 }],
+                   ['finished S1 only', [[1, 1, 23]], { present: true, n: 6 }]];
+    for (const [label, marks, exp] of cases) {
+        const spec = advFlags(mtWorld(now, { s3NoArm }), down);
+        const { env, built } = await advBookmarkRun(spec, advBook(MT_TMDB, 3), advMarks(MT, marks));
+        advCheck(S, label, freshOf(env, built, ['94664', '59193']), exp);
+    }
+}
+scenarios.adv_mt_book_tmdb_up = S => advMtBook(S, false, false);
+scenarios.adv_mt_book_tmdb_down = S => advMtBook(S, true, false);
+scenarios.adv_mt_book_s3_not_in_arm_tmdb_down = S => advMtBook(S, true, true);
+
+// The S2 "Part 2" era: Part 2 is the airing one, nothing after it yet
+function mtPart2World(now, o) {
+    o = o || {};
+    const parts = [
+        { id: 39535, name: 'Mushoku Tensei: Isekai Ittara Honki Dasu', japanese: MT, episodes: 11, date: '2021-01-11', arm: 1, dub: 11 },
+        { id: 45576, name: 'Mushoku Tensei: Isekai Ittara Honki Dasu Part 2', episodes: 12, date: '2021-10-04', arm: 1, dub: 12 },
+        { id: 51179, name: 'Mushoku Tensei II: Isekai Ittara Honki Dasu', episodes: 12, date: '2026-04-08', arm: 2, dub: 12 },
+        { id: 55888, name: 'Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2', status: 'ongoing', episodes: 12, aired: 6, date: '2026-08-24',
+          arm: o.p2arm === undefined ? 2 : o.p2arm, noArm: !!o.p2NoArm, dub: 5, hot: true }
+    ];
+    const tmdb = Object.assign({}, MT_TMDB, { seasonList: [
+        { season_number: 1, episode_count: 23, air_date: '2021-01-11', name: 'Сезон 1' },
+        { season_number: 2, episode_count: 24, air_date: '2026-04-08', name: 'Сезон 2' }] });
+    return advWorld(now, { tmdb, parts, extra: o.extra });
+}
+async function advMtPart2(S, down, list, extraOpts) {
+    const now = Date.now();
+    const cases = [['P2 not started (S2E1-12 seen)', [[1, 1, 23], [2, 1, 12]], { present: true, n: 5 }],
+                   ['P2 E1-3 seen (S2E13-15)', [[1, 1, 23], [2, 1, 15]], { present: true, n: 2 }],
+                   ['P2 E1-8 seen via subs (S2E13-20), dub 5', [[1, 1, 23], [2, 1, 20]], { present: false }]];
+    for (const [label, marks, exp] of cases) {
+        if (list) {
+            const spec = advFlags(mtPart2World(now, Object.assign({ extra: Object.assign({ rates: [{ id: 1, target_id: 55888, status: 'watching', episodes: 0 }] }, ADV_USER) }, extraOpts)), down);
+            const st = down ? { shikimori_tmdb_info: { i94664: { v: 2, t: 'tv', original_name: MT, year: '2021', score: 8 } } } : {};
+            const r = await advListRun(spec, advMarks(MT, marks), st);
+            advCheck(S, label, freshOf(r.env, r.built, ['55888', '94664']), exp);
+        } else {
+            const spec = advFlags(mtPart2World(now, extraOpts), down);
+            const { env, built } = await advBookmarkRun(spec, advBook(MT_TMDB, 2), advMarks(MT, marks));
+            advCheck(S, label, freshOf(env, built, ['94664', '55888']), exp);
+        }
+    }
+}
+scenarios.adv_mt_part2_book_tmdb_up = S => advMtPart2(S, false, false);
+scenarios.adv_mt_part2_book_tmdb_down = S => advMtPart2(S, true, false);
+scenarios.adv_mt_part2_list_tmdb_up = S => advMtPart2(S, false, true);
+scenarios.adv_mt_part2_list_tmdb_down = S => advMtPart2(S, true, true);
+/* ---------------- Frieren-like: TMDB knows only season 1 (28 eps) ---------------- */
+const FR = '葬送のフリーレン';
+const FR_TMDB = { id: 209867, name_ru: 'Провожающая в последний путь Фрирен', name_en: "Frieren: Beyond Journey's End", original_name: FR,
+    date: '2023-09-29', alt: ['Sousou no Frieren'],
+    seasonList: [{ season_number: 1, episode_count: 28, air_date: '2023-09-29', name: 'Сезон 1' }] };
+function frWorld(now, o) {
+    o = o || {};
+    const parts = [
+        { id: 52991, name: 'Sousou no Frieren', russian: 'Провожающая в последний путь Фрирен', japanese: FR, episodes: 28, date: '2023-09-29', arm: 1, dub: 28 },
+        { id: 59978, name: 'Sousou no Frieren 2nd Season', russian: 'Провожающая в последний путь Фрирен 2', japanese: FR + ' 第2期', status: 'ongoing',
+          episodes: 10, aired: o.aired || 5, date: '2026-08-28', arm: o.s2arm === undefined ? 2 : o.s2arm, noArm: !!o.s2NoArm, dub: o.dub || 3, hot: true }
+    ];
+    if (o.ona) {
+        // ONA mini-series between the seasons, ARM maps it to TMDB specials (season 0)
+        parts.splice(1, 0, { id: 56885, name: 'Sousou no Frieren: ●● no Mahou', kind: 'ona', episodes: 10, date: '2023-10-20', arm: 0, next: [] });
+        parts[0].next = [59978];
+    }
+    return advWorld(now, { tmdb: FR_TMDB, parts, extra: o.extra });
+}
+async function advFrBook(S, opts, down, cases) {
+    const now = Date.now();
+    for (const [label, marks, exp] of cases) {
+        const spec = advFlags(frWorld(now, opts), down);
+        const { env, built } = await advBookmarkRun(spec, advBook(FR_TMDB, 1), advMarks(FR, marks));
+        advCheck(S, label, freshOf(env, built, ['209867', '59978']), exp);
+    }
+}
+const FR_CASES = [['S1 done, S2E1-2 marked in season 2', [[1, 1, 28], [2, 1, 2]], { present: true, n: 1 }],
+                  ['S1 done, S2 not started', [[1, 1, 28]], { present: true, n: 3 }],
+                  ['S1 done, S2E1-5 via subs (dub 3)', [[1, 1, 28], [2, 1, 5]], { present: false }]];
+scenarios.adv_fr_book_arm2_tmdb_up = S => advFrBook(S, {}, false, FR_CASES);
+scenarios.adv_fr_book_s2_not_in_arm_tmdb_up = S => advFrBook(S, { s2NoArm: true }, false, FR_CASES);
+scenarios.adv_fr_book_arm_abs_tmdb_up = S => advFrBook(S, { s2arm: 1 }, false, FR_CASES);
+scenarios.adv_fr_book_arm_abs_tmdb_down = S => advFrBook(S, { s2arm: 1 }, true, FR_CASES);
+// + an ONA mini-series that ARM maps to TMDB season 0
+scenarios.adv_fr_book_ona_arm_abs_tmdb_down = S => advFrBook(S, { s2arm: 1, ona: true }, true, FR_CASES);
+scenarios.adv_fr_book_ona_arm_null_tmdb_down = S => advFrBook(S, { s2arm: null, ona: true }, true, FR_CASES);
+scenarios.adv_fr_book_ona_arm_abs_tmdb_up = S => advFrBook(S, { s2arm: 1, ona: true }, false, FR_CASES);
+
+async function advFrList(S, opts, down) {
+    const now = Date.now();
+    for (const [label, marks, exp] of FR_CASES) {
+        const spec = advFlags(frWorld(now, Object.assign({ extra: Object.assign({ rates: [{ id: 1, target_id: 59978, status: 'watching', episodes: 0 }] }, ADV_USER) }, opts)), down);
+        const st = down ? { shikimori_tmdb_info: { i209867: { v: 2, t: 'tv', original_name: FR, year: '2023', score: 9 } } } : {};
+        const r = await advListRun(spec, advMarks(FR, marks), st);
+        advCheck(S, label, freshOf(r.env, r.built, ['59978', '209867']), exp);
+    }
+}
+scenarios.adv_fr_list_arm2_tmdb_up = S => advFrList(S, {}, false);
+scenarios.adv_fr_list_arm2_tmdb_down = S => advFrList(S, {}, true);
+
+/* ---------------- Single-season ongoing: ARM without season, TMDB without data ---------------- */
+const HS = '星の歌';
+const HS_TMDB = { id: 300001, name_ru: 'Песнь звёзд', name_en: 'Song of Stars', original_name: HS, date: '2026-08-15', alt: ['Hoshi no Uta'],
+    seasonList: [{ season_number: 1, episode_count: 12, air_date: '2026-08-15', name: 'Сезон 1' }] };
+function hsWorld(now, o) {
+    o = o || {};
+    return advWorld(now, { tmdb: HS_TMDB, extra: o.extra, parts: [
+        { id: 61000, name: 'Hoshi no Uta', russian: 'Песнь звёзд', japanese: HS, status: 'ongoing', episodes: o.eps === undefined ? 12 : o.eps,
+          aired: 7, date: '2026-08-15', arm: null, dub: 5, hot: true }] });
+}
+const HS_CASES = [['E1-3 watched, dub 5', [[1, 1, 3]], { present: true, n: 2 }],
+                  ['E1-5 watched, dub 5', [[1, 1, 5]], { present: false }],
+                  ['E1-7 watched via subs, dub 5', [[1, 1, 7]], { present: false }]];
+async function advHs(S, list, down, opts) {
+    const now = Date.now();
+    for (const [label, marks, exp] of HS_CASES) {
+        if (list) {
+            const spec = advFlags(hsWorld(now, Object.assign({ extra: Object.assign({ rates: [{ id: 1, target_id: 61000, status: 'watching', episodes: 0 }] }, ADV_USER) }, opts)), down);
+            const st = down ? { shikimori_tmdb_info: { i300001: { v: 2, t: 'tv', original_name: HS, year: '2026', score: 7 } } } : {};
+            const r = await advListRun(spec, advMarks(HS, marks), st);
+            advCheck(S, label, freshOf(r.env, r.built, ['61000', '300001']), exp);
+        } else {
+            const spec = advFlags(hsWorld(now, opts), down);
+            const { env, built } = await advBookmarkRun(spec, advBook(HS_TMDB, 1), advMarks(HS, marks));
+            advCheck(S, label, freshOf(env, built, ['300001', '61000']), exp);
+        }
+    }
+}
+scenarios.adv_single_book_tmdb_down = S => advHs(S, false, true);
+scenarios.adv_single_book_tmdb_up = S => advHs(S, false, false);
+scenarios.adv_single_list_tmdb_down = S => advHs(S, true, true);
+scenarios.adv_single_list_tmdb_up = S => advHs(S, true, false);
+scenarios.adv_single_list_eps0_tmdb_down = S => advHs(S, true, true, { eps: 0 });
+
+/* ---------------- Long show, planned episodes unknown (0), absolute numbering ---------------- */
+const OP = 'ONE PIECE';
+const OP_TMDB = { id: 37854, name_ru: 'Ван-Пис', name_en: 'One Piece', original_name: OP, date: '1999-10-20', alt: ['One Piece'],
+    seasonList: [{ season_number: 1, episode_count: 1145, air_date: '1999-10-20', name: 'Сезон 1' }] };
+function opWorld(now, o) {
+    o = o || {};
+    return advWorld(now, { tmdb: OP_TMDB, extra: o.extra, parts: [
+        { id: 21, name: 'One Piece', russian: 'Ван-Пис', japanese: 'ONE PIECE', status: 'ongoing', episodes: 0, aired: 1145,
+          date: '1999-10-20', arm: 1, dub: 1140, hot: true }] });
+}
+scenarios.adv_long_book = async function (S) {
+    const now = Date.now();
+    const cases = [['watched 1-1130 (absolute), dub 1140', [[1, 1, 1130]], { present: true, n: 10 }],
+                   ['watched 1-1140', [[1, 1, 1140]], { present: false }],
+                   ['watched 1-1100', [[1, 1, 1100]], { present: true, n: 40 }],
+                   ['watched 1-300', [[1, 1, 300]], { present: true, n: 840 }]];
+    for (const down of [false, true]) {
+        for (const [label, marks, exp] of cases) {
+            const spec = advFlags(opWorld(now), down);
+            const { env, built } = await advBookmarkRun(spec, advBook(OP_TMDB, 1), advMarks(OP, marks));
+            advCheck(S, (down ? '[TMDB down] ' : '[TMDB up] ') + label, freshOf(env, built, ['37854', '21']), exp);
+        }
+    }
+};
+// Long show split by Shikimori into two entries; the newest has planned episodes unknown
+const LS = 'ロングショー';
+const LS_TMDB = { id: 310002, name_ru: 'Долгая история', name_en: 'Long Story', original_name: LS, date: '2017-04-05', alt: ['Long Show'],
+    seasonList: [{ season_number: 1, episode_count: 293, air_date: '2017-04-05', name: 'Сезон 1' },
+                 { season_number: 2, episode_count: 20, air_date: '2026-05-10', name: 'Сезон 2' }] };
+function lsWorld(now, o) {
+    o = o || {};
+    return advWorld(now, { tmdb: LS_TMDB, extra: o.extra, parts: [
+        { id: 34566, name: 'Long Show', japanese: LS, episodes: 293, date: '2017-04-05', arm: 1, dub: 293 },
+        { id: 58000, name: 'Long Show: Two Blue Vortex', japanese: LS + ' 第2部', status: 'ongoing', episodes: 0, aired: 21, date: '2026-05-10',
+          arm: o.s2arm === undefined ? 1 : o.s2arm, noArm: !!o.s2NoArm, dub: 20, hot: true }] });
+}
+async function advLs(S, opts, down) {
+    const now = Date.now();
+    const cases = [['part 2 E1-15 marked in season 2, dub 20', [[1, 1, 293], [2, 1, 15]], { present: true, n: 5 }],
+                   ['part 1 done, part 2 not started', [[1, 1, 293]], { present: true, n: 20 }],
+                   ['part 2 E1-20 marked', [[1, 1, 293], [2, 1, 20]], { present: false }]];
+    for (const [label, marks, exp] of cases) {
+        const spec = advFlags(lsWorld(now, opts), down);
+        const { env, built } = await advBookmarkRun(spec, advBook(LS_TMDB, 2), advMarks(LS, marks));
+        advCheck(S, label, freshOf(env, built, ['310002', '58000']), exp);
+    }
+}
+scenarios.adv_long2_arm_abs_tmdb_up = S => advLs(S, {}, false);
+scenarios.adv_long2_arm_abs_tmdb_down = S => advLs(S, {}, true);
+scenarios.adv_long2_not_in_arm_tmdb_down = S => advLs(S, { s2NoArm: true }, true);
+
+/* ---------------- tv_special (recap) between seasons, in the sequel chain ---------------- */
+const SS = '週末ショー';
+const SS_TMDB = { id: 320003, name_ru: 'Шоу выходного дня', name_en: 'Weekend Show', original_name: SS, date: '2024-01-10', alt: ['Shuumatsu Show'],
+    seasonList: [{ season_number: 0, episode_count: 1, air_date: '2026-08-23', name: 'Спецвыпуски' },
+                 { season_number: 1, episode_count: 12, air_date: '2024-01-10', name: 'Сезон 1' },
+                 { season_number: 2, episode_count: 12, air_date: '2026-08-30', name: 'Сезон 2' }] };
+function ssWorld(now, o) {
+    o = o || {};
+    const parts = [
+        { id: 57001, name: 'Shuumatsu Show', japanese: SS, episodes: 12, date: '2024-01-10', arm: 1, dub: 12 },
+        { id: 57002, name: 'Shuumatsu Show: Recap', kind: 'tv_special', episodes: 1, date: '2026-08-23', noArm: true },
+        { id: 57003, name: 'Shuumatsu Show 2nd Season', japanese: SS + ' 第2期', status: 'ongoing', episodes: 12, aired: 6, date: '2026-08-30',
+          arm: o.s2arm === undefined ? 2 : o.s2arm, noArm: o.s2NoArm !== false, dub: 5, hot: true }
+    ];
+    return advWorld(now, { tmdb: SS_TMDB, parts, extra: o.extra });
+}
+async function advSs(S, opts, down) {
+    const now = Date.now();
+    const cases = [['S2E1-3 watched, dub 5', [[1, 1, 12], [2, 1, 3]], { present: true, n: 2 }],
+                   ['S1 done, S2 not started', [[1, 1, 12]], { present: true, n: 5 }],
+                   ['S2E1-5 watched', [[1, 1, 12], [2, 1, 5]], { present: false }]];
+    for (const [label, marks, exp] of cases) {
+        const spec = advFlags(ssWorld(now, opts), down);
+        const { env, built } = await advBookmarkRun(spec, advBook(SS_TMDB, 2), advMarks(SS, marks));
+        advCheck(S, label, freshOf(env, built, ['320003', '57003']), exp);
+    }
+}
+scenarios.adv_special_between_tmdb_up = S => advSs(S, {}, false);
+scenarios.adv_special_between_tmdb_down = S => advSs(S, {}, true);
+scenarios.adv_special_between_arm2_tmdb_down = S => advSs(S, { s2NoArm: false, s2arm: 2 }, true);
+/* ---------------- Demon Slayer-like: ARM absolute (all season 1), a TMDB season made of two
+ *                  Shikimori entries without "part/cour" in the name (Mugen Ressha-hen TV +
+ *                  Yuukaku-hen = TMDB S2) ---------------- */
+const KNY = '鬼滅の刃';
+const KNY_TMDB = { id: 85937, name_ru: 'Клинок, рассекающий демонов', name_en: 'Demon Slayer: Kimetsu no Yaiba', original_name: KNY,
+    date: '2019-04-06', alt: ['Kimetsu no Yaiba'],
+    seasonList: [{ season_number: 1, episode_count: 26, air_date: '2019-04-06', name: 'Сезон 1' },
+                 { season_number: 2, episode_count: 18, air_date: '2021-10-10', name: 'Сезон 2' },
+                 { season_number: 3, episode_count: 11, air_date: '2023-04-09', name: 'Сезон 3' },
+                 { season_number: 4, episode_count: 8, air_date: '2026-08-30', name: 'Сезон 4' }] };
+function knyWorld(now, o) {
+    o = o || {};
+    const lab = o.labels || [1, 1, 1, 1, 1];
+    return advWorld(now, { tmdb: KNY_TMDB, extra: o.extra, parts: [
+        { id: 38000, name: 'Kimetsu no Yaiba', japanese: KNY, episodes: 26, date: '2019-04-06', arm: lab[0], dub: 26 },
+        { id: 49926, name: 'Kimetsu no Yaiba: Mugen Ressha-hen', episodes: 7, date: '2021-10-10', arm: lab[1], dub: 7 },
+        { id: 47778, name: 'Kimetsu no Yaiba: Yuukaku-hen', episodes: 11, date: '2021-12-05', arm: lab[2], dub: 11 },
+        { id: 51019, name: 'Kimetsu no Yaiba: Katanakaji no Sato-hen', episodes: 11, date: '2023-04-09', arm: lab[3], dub: 11 },
+        { id: 55701, name: 'Kimetsu no Yaiba: Hashira Geiko-hen', status: 'ongoing', episodes: 8, aired: 5, date: '2026-08-30', arm: lab[4], dub: 5, hot: true }] });
+}
+async function advKny(S, opts, down) {
+    const now = Date.now();
+    const cases = [['mid S4 (S4E1-3), dub 5', [[1, 1, 26], [2, 1, 18], [3, 1, 11], [4, 1, 3]], { present: true, n: 2 }],
+                   ['S3 done, S4 not started', [[1, 1, 26], [2, 1, 18], [3, 1, 11]], { present: true, n: 5 }],
+                   ['S4E1-5 watched', [[1, 1, 26], [2, 1, 18], [3, 1, 11], [4, 1, 5]], { present: false }]];
+    for (const [label, marks, exp] of cases) {
+        const spec = advFlags(knyWorld(now, opts), down);
+        const { env, built } = await advBookmarkRun(spec, advBook(KNY_TMDB, 4), advMarks(KNY, marks));
+        advCheck(S, label, freshOf(env, built, ['85937', '55701']), exp);
+    }
+}
+scenarios.adv_kny_arm_abs_tmdb_up = S => advKny(S, {}, false);
+scenarios.adv_kny_arm_abs_tmdb_down = S => advKny(S, {}, true);
+scenarios.adv_kny_arm_tmdbstyle_tmdb_down = S => advKny(S, { labels: [1, 2, 2, 3, 4] }, true);
+
+/* ---------------- New season TMDB does not know yet, fully dubbed; list item ---------------- */
+const NS = 'ニッチな話';
+function nsWorld(now, o) {
+    o = o || {};
+    const s1eps = o.s1eps || 12;
+    const tmdb = { id: 330004, name_ru: 'Нишевая история', name_en: 'Niche Story', original_name: NS, date: '2024-04-05', alt: ['Niche no Hanashi'],
+        seasonList: [{ season_number: 1, episode_count: s1eps, air_date: '2024-04-05', name: 'Сезон 1' }]
+            .concat(o.s2NoDate ? [{ season_number: 2, episode_count: 12, air_date: null, name: 'Сезон 2' }] : [])
+            .concat(o.s2Late ? [{ season_number: 2, episode_count: 12, air_date: '2026-08-05', name: 'Сезон 2' }] : []) };
+    return advWorld(now, { tmdb, extra: o.extra, parts: [
+        { id: 58100, name: 'Niche no Hanashi', japanese: NS, episodes: s1eps, date: '2024-04-05', arm: 1, dub: s1eps },
+        // finished airing two weeks ago, the dub caught up three days ago
+        { id: 58101, name: 'Niche no Hanashi 2nd Season', japanese: NS + ' 第2期', status: o.s2status || 'released', episodes: 12, aired: 12,
+          date: '2026-06-28', arm: 2, dub: o.dub || 12, hot: true, dubAgoH: 72 }] });
+}
+async function advNs(S, list, opts) {
+    const now = Date.now();
+    opts = opts || {};
+    const s1 = opts.s1eps || 12;
+    const dub = opts.dub || 12;
+    const cases = [['S1 done, S2 not started (S2 dub ' + dub + '/12)', [[1, 1, s1]], { present: true, n: dub }],
+                   ['S1 done, S2E1-4 watched', [[1, 1, s1], [2, 1, 4]], { present: true, n: dub - 4 }]];
+    for (const [label, marks, exp] of cases) {
+        if (list) {
+            const spec = nsWorld(now, Object.assign({ extra: Object.assign({ rates: [{ id: 1, target_id: 58101, status: 'watching', episodes: 0 }] }, ADV_USER) }, opts));
+            const r = await advListRun(spec, advMarks(NS, marks));
+            advCheck(S, label, freshOf(r.env, r.built, ['58101', '330004']), exp);
+        } else {
+            const spec = nsWorld(now, opts);
+            const book = advBook({ id: 330004, name_ru: 'Нишевая история', original_name: NS, date: '2024-04-05' }, 1);
+            const { env, built } = await advBookmarkRun(spec, book, advMarks(NS, marks));
+            advCheck(S, label, freshOf(env, built, ['330004', '58101']), exp);
+        }
+    }
+}
+scenarios.adv_newseason_unknown_to_tmdb_list = S => advNs(S, true);
+scenarios.adv_newseason_unknown_to_tmdb_list_s1_24 = S => advNs(S, true, { s1eps: 24 });
+scenarios.adv_newseason_unknown_to_tmdb_list_dub10 = S => advNs(S, true, { dub: 10 });
+scenarios.adv_newseason_unknown_to_tmdb_book = S => advNs(S, false);
+// TMDB already lists season 2, but without an air date yet
+scenarios.adv_newseason_tmdb_nodate_list = S => advNs(S, true, { s2NoDate: true });
+scenarios.adv_newseason_tmdb_nodate_book = S => advNs(S, false, { s2NoDate: true });
+// TMDB has season 2 with its TV date, 38 days after Shikimori's (web) premiere
+scenarios.adv_newseason_tmdb_latedate_list = S => advNs(S, true, { s2Late: true });
+
+/* ---------------- Spy x Family Part 2 from the Shikimori list, user ahead via subs ---------------- */
+scenarios.adv_sxf_list_ahead = async function (S) {
+    const now = Date.now();
+    const spec = sxfWorld(now, { extra: Object.assign({ rates: [{ id: 1, target_id: 50602, status: 'watching', episodes: 0 }] }, ADV_USER) });
+    const cases = [['part 2 E1-8 via subs (S1E13-20), dub 5', sxfMarks(1, 20), { present: false }],
+                   ['part 2 E1-5 (S1E13-17), dub 5', sxfMarks(1, 17), { present: false }],
+                   ['part 2 E1-4 (S1E13-16), dub 5', sxfMarks(1, 16), { present: true, n: 1 }]];
+    for (const [label, timeline, exp] of cases) {
+        const r = await advListRun(spec, timeline);
+        advCheck(S, label, freshOf(r.env, r.built, ['50602', '120089']), exp);
+    }
+};
+
+/* ---------------- Apothecary Diaries, TMDB with absolute numbering, Shikimori list only ---------------- */
+scenarios.adv_k9_list_absolute = async function (S) {
+    const now = Date.now();
+    const spec = kWorld(now, { s2season: 1, s3arm: 1, tmdbAbsolute: true,
+        extra: Object.assign({ rates: [{ id: 1, target_id: 61987, status: 'watching', episodes: 0 }] }, ADV_USER) });
+    const cases = [['S3E1 watched (absolute S1E49)', kMarks(1, true), { present: false }],
+                   ['S3 not started (absolute S1E1-48)', kMarks(0, true), { present: true, n: 1 }]];
+    for (const [label, timeline, exp] of cases) {
+        const r = await advListRun(spec, timeline);
+        const hit = kFind(r.built, r.env);
+        advCheck(S, label, hit ? { new: hit.new, w: hit.w, t: hit.t } : null, exp);
+    }
+};
+// Same, bookmark + list at once
+scenarios.adv_k9_list_and_book_absolute = async function (S) {
+    const now = Date.now();
+    const spec = kWorld(now, { s2season: 1, s3arm: 1, tmdbAbsolute: true,
+        extra: Object.assign({ rates: [{ id: 1, target_id: 61987, status: 'watching', episodes: 0 }] }, ADV_USER) });
+    const cases = [['S3E1 watched (absolute S1E49)', kMarks(1, true), { present: false }],
+                   ['S3 not started (absolute S1E1-48)', kMarks(0, true), { present: true, n: 1 }]];
+    for (const [label, timeline, exp] of cases) {
+        const r = await twoLoads(spec, { storage: { shikimori_user: 'me' }, favorites: { book: [K_BOOK] }, timeline });
+        const hit = kFind(r.built, r.env);
+        advCheck(S, label, hit ? { new: hit.new, w: hit.w, t: hit.t } : null, exp);
+    }
+};
+
+/* ---------------- Mushoku Tensei with the real "episode 0" TV special (Shugo Jutsushi Fitz)
+ *                  that TMDB counts as S2E1 ---------------- */
+function mtFitzWorld(now) {
+    const parts = [
+        { id: 39535, name: 'Mushoku Tensei: Isekai Ittara Honki Dasu', japanese: MT, episodes: 11, date: '2021-01-11', arm: 1, dub: 11 },
+        { id: 45576, name: 'Mushoku Tensei: Isekai Ittara Honki Dasu Part 2', episodes: 12, date: '2021-10-04', arm: 1, dub: 12 },
+        { id: 50360, name: 'Mushoku Tensei II: Isekai Ittara Honki Dasu - Shugo Jutsushi Fitz', kind: 'tv_special', episodes: 1, date: '2026-03-30', arm: 2 },
+        { id: 51179, name: 'Mushoku Tensei II: Isekai Ittara Honki Dasu', episodes: 12, date: '2026-04-06', arm: 2, dub: 12 },
+        { id: 55888, name: 'Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2', status: 'ongoing', episodes: 12, aired: 6, date: '2026-08-24', arm: 2, dub: 5, hot: true }
+    ];
+    const tmdb = Object.assign({}, MT_TMDB, { seasonList: [
+        { season_number: 1, episode_count: 23, air_date: '2021-01-11', name: 'Сезон 1' },
+        { season_number: 2, episode_count: 25, air_date: '2026-03-30', name: 'Сезон 2' }] });
+    return advWorld(now, { tmdb, parts });
+}
+scenarios.adv_mt_fitz_book = async function (S) {
+    const now = Date.now();
+    // TMDB S2: E1 = Fitz, E2-13 = cour 1, E14-25 = cour 2
+    const cases = [['cour 2 E1-3 (S2E14-16), dub 5', [[1, 1, 23], [2, 1, 16]], { present: true, n: 2 }],
+                   ['cour 2 E1-5 (S2E14-18), dub 5', [[1, 1, 23], [2, 1, 18]], { present: false }],
+                   ['cour 2 E1-4 (S2E14-17), dub 5', [[1, 1, 23], [2, 1, 17]], { present: true, n: 1 }]];
+    for (const down of [false, true]) {
+        for (const [label, marks, exp] of cases) {
+            const spec = advFlags(mtFitzWorld(now), down);
+            const { env, built } = await advBookmarkRun(spec, advBook(MT_TMDB, 2), advMarks(MT, marks));
+            advCheck(S, (down ? '[TMDB down] ' : '[TMDB up] ') + label, freshOf(env, built, ['94664', '55888']), exp);
+        }
+    }
+};
+/* ---------------- ONA series (e.g. a donghua) in the Shikimori list; ARM row without season, media ONA ---------------- */
+const DH = '斗破苍穹';
+const DH_TMDB = { id: 340005, name_ru: 'Битва сквозь небеса', name_en: 'Battle Through the Heavens', original_name: DH, date: '2026-07-01',
+    alt: ['Doupo Cangqiong'], seasonList: [{ season_number: 1, episode_count: 52, air_date: '2026-07-01', name: 'Сезон 1' }] };
+function dhWorld(now, o) {
+    o = o || {};
+    return advWorld(now, { tmdb: DH_TMDB, extra: o.extra, parts: [
+        { id: 62000, name: 'Doupo Cangqiong 6th Season', japanese: DH, kind: 'ona', status: 'ongoing', episodes: 52, aired: 14, date: '2026-07-01',
+          arm: null, media: 'ONA', dub: 12, hot: true }] });
+}
+scenarios.adv_ona_list_media_unknown = async function (S) {
+    const now = Date.now();
+    const cases = [['E1-10 watched, dub 12', [[1, 1, 10]], { present: true, n: 2 }],
+                   ['E1-12 watched, dub 12', [[1, 1, 12]], { present: false }]];
+    for (const [label, marks, exp] of cases) {
+        const spec = dhWorld(now, { extra: Object.assign({ rates: [{ id: 1, target_id: 62000, status: 'watching', episodes: 0 }] }, ADV_USER) });
+        const r = await advListRun(spec, advMarks(DH, marks));
+        advCheck(S, label, freshOf(r.env, r.built, ['62000', '340005']), exp);
+    }
+};
+
+/* ---------------- Re:Zero-like: a TV-kind recap ("Shin Henshuu-ban") that ARM maps to TMDB specials ---------------- */
+const RZ = 'Re：ゼロから始める異世界生活';
+const RZ_TMDB = { id: 65942, name_ru: 'Re: Жизнь в альтернативном мире с нуля', name_en: 'Re:ZERO -Starting Life in Another World-', original_name: RZ,
+    date: '2016-04-04', alt: ['Re:Zero kara Hajimeru Isekai Seikatsu'],
+    seasonList: [{ season_number: 1, episode_count: 25, air_date: '2016-04-04', name: 'Сезон 1' },
+                 { season_number: 2, episode_count: 25, air_date: '2020-07-08', name: 'Сезон 2' },
+                 { season_number: 3, episode_count: 16, air_date: '2026-08-26', name: 'Сезон 3' }] };
+function rzWorld(now, o) {
+    o = o || {};
+    const lab = o.labels || [1, 0, 1, 1, 1];
+    return advWorld(now, { tmdb: RZ_TMDB, extra: o.extra, parts: [
+        { id: 31240, name: 'Re:Zero kara Hajimeru Isekai Seikatsu', japanese: RZ, episodes: 25, date: '2016-04-04', arm: lab[0], dub: 25, next: [39587] },
+        { id: 38414, name: 'Re:Zero kara Hajimeru Isekai Seikatsu Shin Henshuu-ban', episodes: 13, date: '2020-01-01', arm: lab[1], next: [] },
+        { id: 39587, name: 'Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season', episodes: 13, date: '2020-07-08', arm: lab[2], dub: 13 },
+        { id: 42203, name: 'Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2', episodes: 12, date: '2021-01-06', arm: lab[3], dub: 12 },
+        { id: 54857, name: 'Re:Zero kara Hajimeru Isekai Seikatsu 3rd Season', status: 'ongoing', episodes: 16, aired: 6, date: '2026-08-26', arm: lab[4], dub: 5, hot: true }] });
+}
+async function advRz(S, opts, down) {
+    const now = Date.now();
+    const cases = [['mid S3 (S3E1-3), dub 5', [[1, 1, 25], [2, 1, 25], [3, 1, 3]], { present: true, n: 2 }],
+                   ['S2 done, S3 not started', [[1, 1, 25], [2, 1, 25]], { present: true, n: 5 }],
+                   ['S3E1-5 watched', [[1, 1, 25], [2, 1, 25], [3, 1, 5]], { present: false }]];
+    for (const [label, marks, exp] of cases) {
+        const spec = advFlags(rzWorld(now, opts), down);
+        const { env, built } = await advBookmarkRun(spec, advBook(RZ_TMDB, 3), advMarks(RZ, marks));
+        advCheck(S, label, freshOf(env, built, ['65942', '54857']), exp);
+    }
+}
+scenarios.adv_rezero_recap_arm_abs_tmdb_down = S => advRz(S, {}, true);
+scenarios.adv_rezero_recap_arm_abs_tmdb_up = S => advRz(S, {}, false);
+scenarios.adv_rezero_recap_arm_tmdbstyle_tmdb_down = S => advRz(S, { labels: [1, 0, 2, 2, 3] }, true);
+
+/* ---------------- SxF Part 2 from the list, TMDB lists only the episodes aired so far (12 + 5) ---------------- */
+scenarios.adv_sxf_list_tmdb_partial = async function (S) {
+    const now = Date.now();
+    const spec = sxfWorld(now, { extra: Object.assign({ rates: [{ id: 1, target_id: 50602, status: 'watching', episodes: 0 }] }, ADV_USER) });
+    spec.tmdb[0].seasonList = [{ season_number: 1, episode_count: 17, air_date: '2022-04-09', name: 'Сезон 1' }];
+    const cases = [['part 2 E1-3 (S1E13-15), dub 5', sxfMarks(1, 15), { present: true, n: 2 }],
+                   ['part 1 done, part 2 not started', sxfMarks(1, 12), { present: true, n: 5 }]];
+    for (const [label, timeline, exp] of cases) {
+        const r = await advListRun(spec, timeline);
+        advCheck(S, label, freshOf(r.env, r.built, ['50602', '120089']), exp);
+    }
+};
+
+/* ---------------- Frieren S2 finished airing and fully dubbed; TMDB still lists only S1 (28) ---------------- */
+async function advFrDone(S, list) {
+    const now = Date.now();
+    const cases = [['S1 done, S2 not started (dub 10/10)', [[1, 1, 28]], { present: true, n: 10 }],
+                   ['S1 done, S2E1-4 watched', [[1, 1, 28], [2, 1, 4]], { present: true, n: 6 }]];
+    for (const [label, marks, exp] of cases) {
+        const base = frWorld(now, { aired: 10, dub: 10, extra: list ? Object.assign({ rates: [{ id: 1, target_id: 59978, status: 'watching', episodes: 0 }] }, ADV_USER) : undefined });
+        // S2 is over: status released, last dubbed episode three days ago
+        base.animes.find(a => a.id == 59978).status = 'released';
+        base.kodik.find(k => k.shikimori_id == 59978).anime_status = 'released';
+        base.kodik.find(k => k.shikimori_id == 59978).updated_at = iso(now - 3 * DAY);
+        base.kodik.find(k => k.shikimori_id == 59978).created_at = iso(now - 40 * DAY);
+        const r = list ? await advListRun(base, advMarks(FR, marks))
+                       : await advBookmarkRun(base, advBook(FR_TMDB, 1), advMarks(FR, marks));
+        advCheck(S, label, freshOf(r.env, r.built, ['59978', '209867']), exp);
+    }
+}
+scenarios.adv_fr_s2_done_list = S => advFrDone(S, true);
+scenarios.adv_fr_s2_done_book = S => advFrDone(S, false);
+/* ---------------- One TMDB failure, then TMDB is back: does the right answer come back? ---------------- */
+scenarios.adv_kny_tmdb_blip = async function (S) {
+    const now = Date.now();
+    const marks = advMarks(KNY, [[1, 1, 26], [2, 1, 18], [3, 1, 11], [4, 1, 3]]);
+    const first = createEnv({ route: makeWorld(advFlags(knyWorld(now), true)).route, favorites: { book: [advBook(KNY_TMDB, 4)] }, timeline: marks });
+    first.load(FILE);
+    await openMain(first);
+    await first.idle();
+    // next showing, an hour later in real life: TMDB answers again
+    const env = createEnv({ route: makeWorld(knyWorld(now)).route, favorites: { book: [advBook(KNY_TMDB, 4)] }, timeline: marks, storage: persisted(first) });
+    env.load(FILE);
+    const { built } = await openMain(env);
+    const tv = env.log.requests.filter(r => /\/tv\/85937(\?|$)/.test(r.url)).length;
+    console.log('      TMDB tv/85937 requests on the second showing:', tv);
+    advCheck(S, 'TMDB failed once, back now; mid S4 (S4E1-3), dub 5', freshOf(env, built, ['85937', '55701']), { present: true, n: 2 });
+};
+
+/* ------------------------------------------------------------------
+ * X. Review of 3.7.3 (agent A)
+ * ------------------------------------------------------------------ */
+function frierenMarksS1(upto) {
+    const t = {};
+    for (let ep = 1; ep <= upto; ep++) t[xhash([1, '', ep, '葬送のフリーレン'].join(''))] = 100;
+    return t;
+}
+const xhash = require('./lampa').hash;
+// TMDB season list of Frieren has only S1 (28) - FRIEREN_TMDB has no seasonList, like a TMDB that has not added S2 yet
+function frierenListWorld(now, dub) {
+    const S2 = Object.assign({}, F.FRIEREN_S2, { episodesAired: dub });
+    return frierenWorld(now, { animes: [F.FRIEREN_S1, S2], user: { id: 42, nickname: 'me' },
+        rates: [{ id: 1, target_id: 59978, status: 'watching', episodes: 0 }],
+        kodik: [{ shikimori_id: 59978, translation: { id: 610, title: 'AniLibria.TV', type: 'voice' }, last_episode: dub, updated_at: iso(now - 3 * HOUR), episodes_aired: dub },
+                { shikimori_id: 52991, translation: { id: 610, title: 'AniLibria.TV', type: 'voice' }, last_episode: 28, updated_at: iso(now - 200 * DAY), episodes_aired: 28, anime_status: 'released' }] });
+}
+scenarios.x1_list_tmdb_lacks_season = async function (S) {
+    const now = Date.now();
+    let r = await twoLoads(frierenListWorld(now, 10), { storage: { shikimori_user: 'me' }, timeline: frierenMarksS1(28) });
+    let hit = freshOf(r.env, r.built, ['59978', '209867']);
+    check(S, 'S1 finished, S2 10/10 dubbed, nothing of S2 watched → +10', hit && hit.new == 10, hit);
+    r = await twoLoads(frierenListWorld(now, 5), { storage: { shikimori_user: 'me' }, timeline: frierenMarksS1(23) });
+    hit = freshOf(r.env, r.built, ['59978', '209867']);
+    check(S, 'S1 stopped at E23, S2 5 dubbed → +5', hit && hit.new == 5, hit);
+};
+// Spy x Family Part 2 from the Shikimori list, user is ahead of the dub (watched 7 with subs, dub has 5)
+scenarios.x2_list_part2_ahead_of_dub = async function (S) {
+    const now = Date.now();
+    const spec = sxfWorld(now, { extra: { user: { id: 42, nickname: 'me' }, rates: [{ id: 1, target_id: 50602, status: 'watching', episodes: 0 }] } });
+    spec.animes[1] = Object.assign({}, spec.animes[1], { episodesAired: 8 });
+    const r = await twoLoads(spec, { storage: { shikimori_user: 'me' }, timeline: sxfMarks(1, 19) });
+    const hit = freshOf(r.env, r.built, ['50602', '120089']);
+    check(S, 'P2 E1-7 watched (S1E13-19), dub 5 → not in «Новые серии»', !hit, hit);
+};
+// Apothecary S3 from the Shikimori list, TMDB absolute numbering that lists aired episodes only (S1 = 49)
+scenarios.x3_list_absolute_aired_only = async function (S) {
+    const now = Date.now();
+    const spec = kWorld(now, { s2season: 1, s3arm: 1, tmdbAbsolute: true, extra: { user: { id: 42, nickname: 'me' }, rates: [{ id: 1, target_id: 61987, status: 'watching', episodes: 0 }] } });
+    let r = await twoLoads(spec, { storage: { shikimori_user: 'me' }, timeline: kMarks(1, true) });
+    let hit = kFind(r.built, r.env);
+    check(S, 'S3E1 watched (S1E49) → not new', !hit, hit);
+    r = await twoLoads(spec, { storage: { shikimori_user: 'me' }, timeline: kMarks(0, true) });
+    hit = kFind(r.built, r.env);
+    check(S, 'S3 not started (S1E48) → +1', hit && hit.new == 1, hit);
+};
+// Part 2 from the Shikimori list with unknown planned episodes (Shikimori episodes: 0)
+scenarios.x4_list_part2_eps_unknown = async function (S) {
+    const now = Date.now();
+    const spec = sxfWorld(now, { extra: { user: { id: 42, nickname: 'me' }, rates: [{ id: 1, target_id: 50602, status: 'watching', episodes: 0 }] } });
+    spec.animes[1] = Object.assign({}, spec.animes[1], { episodes: 0 });
+    let r = await twoLoads(spec, { storage: { shikimori_user: 'me' }, timeline: sxfMarks(1, 17) });
+    let hit = freshOf(r.env, r.built, ['50602', '120089']);
+    check(S, 'P2 E1-5 watched (S1E13-17), dub 5 → not new', !hit, hit);
+    r = await twoLoads(spec, { storage: { shikimori_user: 'me' }, timeline: sxfMarks(1, 15) });
+    hit = freshOf(r.env, r.built, ['50602', '120089']);
+    check(S, 'P2 E1-3 watched (S1E13-15), dub 5 → +2', hit && hit.new == 2, hit);
+};
+
+scenarios.x5_arm11_s3_unknown_tmdb_down = S => kBookmark(S, { s2season: 1, tmdbDown: true }, 'ARM 1/1, S3 not in ARM, TMDB down');
+scenarios.x6_arm11_s3_unknown_tmdb_ok = S => kBookmark(S, { s2season: 1 }, 'ARM 1/1, S3 not in ARM, TMDB ok');
+
+scenarios.x7_feed_card_tmdb_lacks_season = async function (S) {
+    const now = Date.now();
+    const spec = frierenListWorld(now, 10);
+    delete spec.user; delete spec.rates;
+    const r = await twoLoads(spec, { timeline: frierenMarksS1(28) });
+    const hits = r.built.flatMap(l => (l.results || []).filter(c => String(c.id) == '59978').map(c => l.title + ': w=' + c._watched_ep + ' t=' + c._total_ep));
+    console.log('      ', hits.join(' | '));
+    check(S, 'S2 feed cards: S1 finished, S2 not started → no S2 progress', hits.length && hits.every(h => / w=(0|undefined) /.test(h)), hits);
+};
+
+// Новый сезон из списка Shikimori, которого ещё нет в базе соответствий (ARM узнаёт
+// о новых сезонах через недели). Серии отмечены в Lampa — плагин находит карточку
+// TMDB через предыдущий сезон и со второго показа считает их просмотренными
+scenarios.p1_list_newest_not_in_arm = async function (S) {
+    const now = Date.now();
+    const cases = [['S3E1 watched, dub 1', 1, 1, { present: false }],
+                   ['S3 not started, dub 1', 1, 0, { present: true, n: 1 }],
+                   ['S3E1 watched, dub 3', 3, 1, { present: true, n: 2 }],
+                   ['S3E1-3 watched, dub 3', 3, 3, { present: false }]];
+    for (const [label, dub, upto, exp] of cases) {
+        const spec = kWorld(now, { k3dub: dub, extra: { user: { id: 42, nickname: 'me' }, rates: [{ id: 1, target_id: 61987, status: 'watching', episodes: 0 }] } });
+        const r = await twoLoads(spec, { storage: { shikimori_user: 'me' }, timeline: kMarks(upto) });
+        const hit = kFind(r.built, r.env);
+        advCheck(S, label, hit ? { new: hit.new, w: hit.w, t: hit.t } : null, exp);
+    }
+};
+
+// То же для нового сериала: прошлого сезона нет, карточку TMDB плагин находит поиском
+// по названиям. Не нашёл — тайтл остаётся с серий из списка Shikimori
+scenarios.p2_list_new_show_not_in_arm = async function (S) {
+    const now = Date.now();
+    const NEW = '新作の話';
+    const tmdb = { id: 330777, name_ru: 'Новая история', name_en: 'New Story', original_name: NEW, date: '2026-09-20',
+        alt: ['Shinsaku no Hanashi'], seasonList: [{ season_number: 1, episode_count: 12, air_date: '2026-09-20', name: 'Сезон 1' }] };
+    const world = (o) => advWorld(now, { tmdb: o.tmdb || tmdb, extra: Object.assign({ rates: [{ id: 1, target_id: 60500, status: 'watching', episodes: 0 }] }, ADV_USER),
+        parts: [{ id: 60500, name: 'Shinsaku no Hanashi', japanese: NEW, status: 'ongoing', episodes: 12, aired: 3, date: '2026-09-20', noArm: true, dub: 3, hot: true }] });
+    const cases = [['S1E1 watched, dub 3', {}, [[1, 1, 1]], { present: true, n: 2 }],
+                   ['S1E1-3 watched, dub 3', {}, [[1, 1, 3]], { present: false }],
+                   ['nothing watched, dub 3', {}, [], { present: true, n: 3 }],
+                   ['TMDB knows no such show, S1E1-3 watched', { tmdb: Object.assign({}, tmdb, { name_ru: 'Другое', name_en: 'Other', original_name: 'その他', alt: [] }) },
+                    [[1, 1, 3]], { present: true, n: 3 }]];
+    for (const [label, o, marks, exp] of cases) {
+        const r = await advListRun(world(o), advMarks(NEW, marks));
+        advCheck(S, label, freshOf(r.env, r.built, ['60500', '330777']), exp);
+        // Второй показ: найденное или «не нашли» уже запомнено — в поиск TMDB больше не ходим
+        await r.env.idle();
+        const searches = r.env.log.requests.filter(q => /search\/tv/.test(q.url)).length;
+        check(S, label + ': no TMDB search on the second show', searches == 0, searches);
+    }
+};
+
+
 (async function () {
     const names = Object.keys(scenarios).filter(n => !ONLY || n.indexOf(ONLY) >= 0);
     for (const name of names) {
