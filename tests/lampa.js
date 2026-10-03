@@ -232,7 +232,8 @@ function createEnv(opts) {
                 const key = hash([season, season > 10 ? ':' : '', ep, name].join(''));
                 return timeline[key] ? { percent: timeline[key], updated: Date.now() - 3600e3 } : null;
             },
-            update(rec) { timeline[rec.hash] = rec.percent; }
+            update(rec) { timeline[rec.hash] = rec.percent; },
+            view(h) { return { hash: h, percent: timeline[h] || 0, time: 0, duration: 0 }; }
         },
         Input: { edit(params, cb) { log.inputs.push(params); if (opts.onInput) opts.onInput(params, cb); } },
         Background: { change() {} },

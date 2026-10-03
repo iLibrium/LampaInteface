@@ -84,6 +84,8 @@
     var TMDB_INFO_MAX = 60;      // сколько закладок дозапрашиваем за один заход
     var TMDB_INFO_PARALLEL = 4;  // и по сколько запросов разом
     var TMDB_INFO_RETRY = 24 * 60 * 60 * 1000; // сеть не ответила — пробуем снова через сутки
+    var TMDB_INFO_LEGACY = 8;    // записей прежних версий перепроверяем за заход
+    var SEEN_UNDO_MAX = 300;     // отметок серий, которые «Снять отметку» умеет откатить
     var PREFETCH_NAMES_MAX = 20;  // имён TMDB заранее — не больше стольких за раз
     var SEASONS_KEY = 'shikimori_tmdb_seasons';
     var SEASONS_TTL = 7 * 24 * 60 * 60 * 1000;  // сезоны TMDB меняются редко — неделя
@@ -532,6 +534,12 @@
                     // Что успели и что было в памяти — отдаём: без связей часть
                     // закладок просто останется без нового сезона, это не повод
                     // терять остальное
+                    // Устаревшая память лучше, чем ничего: связи не меняются, а эфир
+                    // уточнится при следующем ответе
+                    for (var m = 0; m < ids.length; m++) {
+                        var old = self.related_memo[ids[m]];
+                        if (old && !result[ids[m]]) result[ids[m]] = old.data;
+                    }
                     var any = false;
                     for (var k in result) { any = true; break; }
                     if (any) return ok(result);
@@ -1327,11 +1335,21 @@
             return rec ? (rec.ep || 0) : 0;
         },
 
-        mark: function (sid, ep) {
+        // undo — что отметка сделала в самой Lampa: отметки серий, которых до неё
+        // не было (h), и метка «Просмотрено» на закладке (v). Снимая отметку,
+        // откатываем ровно это — иначе закладка так и оставалась спрятанной
+        mark: function (sid, ep, undo) {
             sid = parseInt(sid, 10);
             if (!sid || !ep) return;
             var map = this.all();
-            map['s' + sid] = { ep: ep, at: Date.now() };
+            var prev = map['s' + sid];
+            var rec = { ep: ep, at: Date.now() };
+            // Повторная отметка не теряет то, что откатывать после прошлой
+            var h = (prev && prev.u && prev.u.h || []).concat(undo && undo.h || []);
+            if (h.length > SEEN_UNDO_MAX) h = h.slice(h.length - SEEN_UNDO_MAX);
+            var v = (undo && undo.v) || (prev && prev.u && prev.u.v) || null;
+            if (h.length || v) rec.u = { h: h, v: v };
+            map['s' + sid] = rec;
             var keys = [];
             for (var k in map) keys.push(k);
             if (keys.length > 500) {
@@ -1342,13 +1360,16 @@
         },
 
         // Отметку плагина можно снять: случайное «Отметить все» иначе прятало
-        // тайтл до выхода следующей серии, и вернуть его было нечем
-        clear: function (sid) {
+        // тайтл до выхода следующей серии, и вернуть его было нечем.
+        // Возвращает запись — в ней то, что нужно откатить в Lampa
+        take: function (sid) {
             sid = parseInt(sid, 10);
             var map = this.all();
-            if (!sid || !map['s' + sid]) return;
+            var rec = sid ? map['s' + sid] : null;
+            if (!rec) return null;
             delete map['s' + sid];
             storSet('shikimori_seen', map);
+            return rec;
         },
 
         reset: function () {
@@ -1356,6 +1377,14 @@
             storSet('shikimori_seen', {});
         }
     };
+
+    // Сериал ли номер TMDB из сопоставления. Вид известен — по нему; не
+    // известен (так база соответствий отвечает про ONA и спецвыпуски) —
+    // по виду тайтла Shikimori: фильм и OVA могли оказаться фильмом TMDB
+    function isSeries(hit, kind) {
+        if (hit.media) return hit.media == 'tv';
+        return SERIES_KINDS.indexOf(kind) >= 0;
+    }
 
     // Тайтл Shikimori, по которому считаются серии карточки: у закладки —
     // сезон, где вышла озвучка, у карточки Shikimori — она сама
@@ -1731,27 +1760,30 @@
                 }
 
                 if (item.action == 'seen') {
-                    markSeen(data, data._total_ep, data._season || 1);
-                    Seen.mark(cardSid(data), data._total_ep);
+                    var written = markSeen(data, data._total_ep, data._season || 1);
+                    Seen.mark(cardSid(data), data._total_ep, { h: written });
                     Lampa.Noty.show(Lampa.Lang.translate('shikimori_noty_seen'));
                 }
 
                 if (item.action == 'unseen') {
-                    Seen.clear(cardSid(data));
+                    unmarkSeen(Seen.take(cardSid(data)));
                     Lampa.Noty.show(Lampa.Lang.translate('shikimori_noty_unseen'));
                 }
 
                 if (item.action == 'seen_all') {
-                    markSeen(data, data._season ? cardEpisodes(data) : 0, data._season || 0);
-                    Seen.mark(cardSid(data), cardEpisodes(data));
+                    var undo = { h: markSeen(data, data._season ? cardEpisodes(data) : 0, data._season || 0), v: null };
                     // Отметок мало: если карточка пришла из закладок, ставим ещё
                     // и метку «Просмотрено», иначе тайтл вернётся при следующей серии
                     if (data._tmdb_card && data.id) {
                         try {
-                            if (!Lampa.Favorite.check(data).viewed) Lampa.Favorite.add('viewed', data, 500);
+                            if (!Lampa.Favorite.check(data).viewed) {
+                                Lampa.Favorite.add('viewed', data, 500);
+                                undo.v = { id: data.id, name: data.name, title: data.title, source: data.source };
+                            }
                         }
                         catch (e) {}
                     }
+                    Seen.mark(cardSid(data), cardEpisodes(data), undo);
                     dropCard(data._card_el);
                     Lampa.Noty.show(Lampa.Lang.translate('shikimori_noty_seen'));
                 }
@@ -1806,18 +1838,44 @@
         // Сезон TMDB общий с прошлыми частями — серии этой идут после них
         var offset = data._season ? data._offset || 0 : 0;
 
+        // Что включили мы, а не было до нас: только это и откатывается при
+        // «Снять отметку» — серии, досмотренные раньше, остаются досмотренными
+        var switched = [];
         var written = 0;
         for (var k = 0; k < names.length; k++) {
             for (var season = first_season; season <= last_season && written < MARK_SEEN_LIMIT; season++) {
                 for (var ep = offset + 1; ep <= offset + last_ep && written < MARK_SEEN_LIMIT; ep++) {
                     try {
                         var hash = Lampa.Utils.hash([season, season > 10 ? ':' : '', ep, names[k]].join(''));
+                        var before = Lampa.Timeline.view ? Lampa.Timeline.view(hash) : null;
+                        if (!before || !before.percent) switched.push(hash);
                         Lampa.Timeline.update({ hash: hash, percent: 100, time: 0, duration: 0 });
                         written++;
                     }
-                    catch (e) { return; }
+                    catch (e) { return switched; }
                 }
             }
+        }
+        return switched;
+    }
+
+    // Откатить то, что сделало «Отметить»: наши отметки серий — если их с тех
+    // пор не досмотрели по-настоящему — и нашу метку «Просмотрено»
+    function unmarkSeen(rec) {
+        var undo = rec && rec.u;
+        if (!undo) return;
+        var list = undo.h || [];
+        for (var i = 0; i < list.length; i++) {
+            try {
+                var now = Lampa.Timeline.view ? Lampa.Timeline.view(list[i]) : null;
+                if (now && now.time) continue;
+                Lampa.Timeline.update({ hash: list[i], percent: 0, time: 0, duration: 0 });
+            }
+            catch (e) {}
+        }
+        if (undo.v && undo.v.id) {
+            try { Lampa.Favorite.remove('viewed', undo.v); }
+            catch (e) {}
         }
     }
 
@@ -2020,7 +2078,7 @@
             var sid = anime ? parseInt(anime.malId || anime.id, 10) : 0;
             var hit = sid ? Match.cacheGet(sid) : null;
             // Отметки по сезонам бывают только у сериалов
-            if (!hit || hit.none || !hit.tmdb || hit.media != 'tv') return null;
+            if (!hit || hit.none || !hit.tmdb || !isSeries(hit, anime.kind)) return null;
             var info = TmdbInfo.get(hit.tmdb, 'tv');
             if (!info || !info.original_name) return null;
 
@@ -2302,17 +2360,31 @@
             return !card.first_air_date && !card.release_date;
         },
 
+        // Запись прежних версий: вид в ней не помечен, а под тем же ключом
+        // раньше бывало и имя фильма с тем же номером — перепроверяем
+        legacy: function (card) {
+            if (!card || !card.id || this.methodOf(card) != 'tv') return false;
+            var info = this.get(card.id, 'tv');
+            return !!info && !info.t && !info.retry;
+        },
+
         fill: function (net, cards, ok) {
             var self = this;
             var queue = [];
             var i;
 
-            // Тот же номер уже спрашивается другим заходом — второй раз не нужно
-            self.busy = self.busy || {};
-            for (i = 0; i < cards.length; i++) {
-                var busy_key = self.key(cards[i].id, self.methodOf(cards[i]));
-                if (self.busy[busy_key] || !self.needs(cards[i]) || queue.length >= TMDB_INFO_MAX) continue;
-                self.busy[busy_key] = true;
+            // Один номер — один запрос за заход. Между заходами не делим: ответ
+            // запроса, отменённого вместе с экраном, не приходит никогда, и
+            // общая пометка «уже спрашиваем» залипала до перезапуска
+            var queued = {};
+            var legacy = 0;
+            for (i = 0; i < cards.length && queue.length < TMDB_INFO_MAX; i++) {
+                var qkey = self.key(cards[i].id, self.methodOf(cards[i]));
+                if (queued[qkey]) continue;
+                var stale = !self.needs(cards[i]) && self.legacy(cards[i]) && legacy < TMDB_INFO_LEGACY;
+                if (!stale && !self.needs(cards[i])) continue;
+                if (stale) legacy++;
+                queued[qkey] = true;
                 queue.push(cards[i]);
             }
 
@@ -2322,9 +2394,11 @@
             var running = 0;
             var next = 0;
             var changed = false;
+            var seasons = false;
 
             function done() {
                 if (changed) self.save();
+                if (seasons) Seasons.save();
                 ok();
             }
 
@@ -2342,7 +2416,10 @@
 
                 Tmdb.get(net, method + '/' + card.id, function (json) {
                     // Тот же ответ знает и сезоны — пригодятся для отметок
-                    if (method == 'tv' && json && json.seasons) Seasons.remember(card.id, json.seasons);
+                    if (method == 'tv' && json && json.seasons) {
+                        Seasons.remember(card.id, json.seasons, true);
+                        seasons = true;
+                    }
                     self.load()[key] = json && json.id ? {
                         v: 2,
                         t: method,
@@ -2351,21 +2428,23 @@
                         score: json.vote_average || 0
                     } : { v: 2, t: method, original_name: '', year: '', score: 0, retry: Date.now() };
                     changed = true;
-                    after(key);
+                    after();
                 }, function (reason) {
                     // Номера нет — это ответ, его помним, чтобы не спрашивать снова.
                     // Сеть молчит — это не ответ: раньше и такой случай записывался
-                    // пустышкой навсегда, и прогресс у закладки больше не находился
+                    // пустышкой навсегда, и прогресс у закладки больше не находился.
+                    // Что знали раньше, при этом не теряем
+                    var prev = self.load()[key] || {};
                     self.load()[key] = reason == 404
                         ? { v: 2, t: method, original_name: '', year: '', score: 0 }
-                        : { v: 2, t: method, original_name: '', year: '', score: 0, retry: Date.now() };
+                        : { v: 2, t: method, original_name: prev.original_name || '', year: prev.year || '',
+                            score: prev.score || 0, retry: Date.now() };
                     changed = true;
-                    after(key);
+                    after();
                 });
             }
 
-            function after(key) {
-                delete self.busy[key];
+            function after() {
                 running--;
                 left--;
                 if (left <= 0) return done();
@@ -2395,7 +2474,9 @@
         // которым Lampa пишет отметки серий. Один раз на тайтл, в фоне.
         // Отметки по сезонам бывают только у сериалов; номер с неизвестным
         // видом (OVA, спецвыпуск) мог оказаться фильмом — его не спрашиваем
-        names: function (sids, done) {
+        // kinds — вид тайтла Shikimori по номеру: у ONA база соответствий вид
+        // TMDB часто не знает, а сериалом она почти всегда и оказывается
+        names: function (sids, done, kinds) {
             var self = this;
             done = done || function () {};
             if (!sids.length) return done({});
@@ -2403,7 +2484,7 @@
                 var cards = [];
                 for (var k in map) {
                     var hit = map[k];
-                    if (!hit || !hit.tmdb || hit.media != 'tv') continue;
+                    if (!hit || !hit.tmdb || !isSeries(hit, kinds && kinds[k])) continue;
                     // У сериала Lampa кладёт name — по нему fill выбирает tv
                     cards.push({ id: hit.tmdb, name: '-' });
                 }
@@ -2452,17 +2533,6 @@
             return this.memo;
         },
 
-        // Ответы приходят пачкой — пишем в хранилище один раз после пачки,
-        // а не весь кеш на каждый ответ
-        saveSoon: function () {
-            var self = this;
-            if (this.save_timer) return;
-            this.save_timer = setTimeout(function () {
-                self.save_timer = null;
-                self.save();
-            }, 0);
-        },
-
         save: function () {
             var all = this.load();
             var keys = [];
@@ -2481,8 +2551,9 @@
             return rec && rec.s && rec.s.length ? rec : null;
         },
 
-        // seasons — массив из карточки TMDB: [{season_number, air_date, episode_count}]
-        remember: function (id, seasons) {
+        // seasons — массив из карточки TMDB: [{season_number, air_date, episode_count}].
+        // later — в хранилище запишет тот, кто запрашивал пачку, один раз в конце
+        remember: function (id, seasons, later) {
             if (!id || !seasons || !seasons.length) return;
             var list = [];
             for (var i = 0; i < seasons.length; i++) {
@@ -2495,7 +2566,7 @@
             if (!list.length) return;
             list.sort(function (a, b) { return a[0] - b[0]; });
             this.load()['i' + id] = { t: Date.now(), s: list };
-            this.saveSoon();
+            if (!later) this.save();
         },
 
         // Спрашивать ли TMDB: данных нет, они старше недели, или у тайтла
@@ -2530,12 +2601,12 @@
             function ask(id) {
                 running++;
                 Tmdb.get(net, 'tv/' + id, function (json) {
-                    if (json && json.seasons && json.seasons.length) self.remember(id, json.seasons);
-                    else self.touch(id);
+                    if (json && json.seasons && json.seasons.length) self.remember(id, json.seasons, true);
+                    else self.touch(id, true);
                     after();
                 }, function () {
                     // Ответа нет — не спрашиваем снова до следующей проверки
-                    self.touch(id);
+                    self.touch(id, true);
                     after();
                 });
             }
@@ -2543,7 +2614,10 @@
             function after() {
                 running--;
                 left--;
-                if (left <= 0) return ok();
+                if (left <= 0) {
+                    self.save();
+                    return ok();
+                }
                 step();
             }
 
@@ -2551,11 +2625,11 @@
         },
 
         // Запрос был, сезонов не узнали: прежние данные храним как есть
-        touch: function (id) {
+        touch: function (id, later) {
             var all = this.load();
             if (all['i' + id]) all['i' + id].f = Date.now();
             else all['i' + id] = { t: 0, s: [], f: Date.now() };
-            this.saveSoon();
+            if (!later) this.save();
         },
 
         // Расставить сезоны TMDB по сезонам Shikimori одного тайтла.
@@ -3509,10 +3583,12 @@
             // и сезоны TMDB для того из них, что выходит сейчас
             var watch_sids = [];
             var watch_hot = {};
+            var watch_kinds = {};
             for (var w = 0; w < watching.length; w++) {
                 var wsid = parseInt(watching[w].malId || watching[w].id, 10);
                 if (!wsid) continue;
                 watch_sids.push(wsid);
+                watch_kinds[wsid] = watching[w].kind;
                 if (isHot(wsid, watching[w])) watch_hot[wsid] = dayOf(watching[w].airedOn && watching[w].airedOn.date) || 1;
             }
             if (watch_sids.length) {
@@ -3521,12 +3597,12 @@
                     var ids = [];
                     for (var k in map) {
                         var hit = map[k];
-                        if (!hit || !hit.tmdb || hit.media == 'movie' || !watch_hot[k]) continue;
+                        if (!hit || !hit.tmdb || !isSeries(hit, watch_kinds[k]) || !watch_hot[k]) continue;
                         if (ids.indexOf(hit.tmdb) < 0 && Seasons.needs(hit.tmdb, watch_hot[k])) ids.push(hit.tmdb);
                     }
                     loadSeasons(ids);
                     release();
-                });
+                }, watch_kinds);
             }
 
             function gotFeed(rows) {
@@ -5049,17 +5125,19 @@
     function prefetchMatches(cards) {
         var ids = [];
         var airing = [];
+        var kinds = {};
         for (var i = 0; i < cards.length; i++) {
             var card = cards[i];
             if (!card || isTmdbCard(card) || card._direct_tmdb) continue;
             var id = parseInt(card.malId || card.id, 10);
             if (!id || ids.indexOf(id) >= 0) continue;
             ids.push(id);
+            kinds[id] = card.kind;
             if (card.status == 'ongoing' && airing.length < PREFETCH_NAMES_MAX) airing.push(id);
         }
         if (!ids.length) return;
         Match.batch(background_net, ids, function () {
-            if (airing.length) TmdbInfo.names(airing);
+            if (airing.length) TmdbInfo.names(airing, null, kinds);
         });
     }
 

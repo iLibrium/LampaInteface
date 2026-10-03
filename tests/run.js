@@ -1194,6 +1194,111 @@ scenarios.r17_mark_one_name = async function (S) {
     check(S, 'marks written once, under the TMDB name', written > 0 && written <= 3 && tmdbFirst, { written, season: card._season, offset: card._offset });
 };
 
+
+/* ------------------------------------------------------------------
+ * B. Находки агента по работе в Lampa (3.7.3)
+ * ------------------------------------------------------------------ */
+// Закладка без даты выхода: имя TMDB плагин дозапрашивает (TmdbInfo.fill)
+const FRIEREN_TRUNC = { id: 209867, name: 'Провожающая в последний путь Фрирен', original_name: 'Sousou no Frieren',
+    genre_ids: [16], original_language: 'ja', origin_country: ['JP'], source: 'tmdb', number_of_seasons: 2 };
+function frierenMarks(eps) {
+    const { hash } = require('./lampa');
+    const t = {};
+    for (const ep of eps) t[hash([2, '', ep, '葬送のフリーレン'].join(''))] = 95;
+    return t;
+}
+
+// Экран закрыли, пока имя TMDB ещё спрашивалось: следующий показ спрашивает снова
+scenarios.b1_screen_closed_during_names = async function (S) {
+    const now = Date.now();
+    const world = makeWorld(frierenWorld(now));
+    const route = (m, u, b) => /\/tv\/209867(\?|$)/.test(u) ? Object.assign({ delay: 600 }, world.route(m, u, b)) : world.route(m, u, b);
+    const env = createEnv({ route, favorites: { book: [FRIEREN_TRUNC] }, timeline: frierenMarks([1, 2, 3]) });
+    env.load(FILE);
+    const tmdb = () => env.log.requests.filter(r => /\/tv\/209867(\?|$)/.test(r.url)).length;
+    const first = new env.components.shikimori_main({ component: 'shikimori_main', page: 1 });
+    first.create();
+    await env.waitFor(() => tmdb() > 0, 8000);
+    first.onDestroy();
+    await new Promise(r => setTimeout(r, 1200));
+    const { built } = await openMain(env);
+    const fresh = lineOf(env, built, 'shikimori_title_fresh');
+    const card = fresh && fresh.results.find(c => c.id == 209867);
+    check(S, 'name asked again after the screen was closed', tmdb() >= 2, tmdb());
+    check(S, 'all 3 watched in Lampa → not in «Новые серии»', !card, card && { n: card._kodik_new, w: card._watched_ep });
+};
+
+// «Снять отметку» на закладке откатывает отметки серий и метку «Просмотрено»
+scenarios.b3_unseen_bookmark = async function (S) {
+    const now = Date.now();
+    const spec = frierenWorld(now);
+    const favorites = { book: [FRIEREN_BOOK] };   // состояние Lampa живёт между запусками
+    const timeline = {};
+    const env = createEnv({ route: makeWorld(spec).route, favorites, timeline });
+    env.load(FILE);
+    const { built } = await openMain(env);
+    const card = (lineOf(env, built, 'shikimori_title_fresh') || { results: [] }).results.find(c => c.id == 209867);
+    if (!card) return check(S, 'bookmark is new before marking', false);
+    await menuAction(env, card, 'seen_all');
+    check(S, 'seen_all wrote marks and the «Просмотрено» tag', Object.keys(timeline).length > 0 && (favorites.viewed || []).length == 1,
+        { marks: Object.keys(timeline).length, viewed: (favorites.viewed || []).length });
+    const env2 = createEnv({ route: makeWorld(spec).route, storage: persisted(env), favorites, timeline });
+    env2.load(FILE);
+    const second = await openMain(env2);
+    const any = second.built.flatMap(l => l.results || []).find(c => String(c.id) == '59978' || c.id == 209867);
+    const ok = any && await menuAction(env2, any, 'unseen');
+    check(S, '«Снять отметку» offered', !!ok);
+    const left = Object.keys(timeline).filter(h => timeline[h]).length;
+    check(S, 'our marks and tag are reverted', left == 0 && !(favorites.viewed || []).length, { left, viewed: (favorites.viewed || []).length });
+    const env3 = createEnv({ route: makeWorld(spec).route, storage: persisted(env2), favorites, timeline });
+    env3.load(FILE);
+    const third = await openMain(env3);
+    const back = (lineOf(env3, third.built, 'shikimori_title_fresh') || { results: [] }).results.find(c => c.id == 209867);
+    check(S, 'after restart the bookmark is back in «Новые серии»', !!back);
+};
+
+// Отметки, поставленные до «Отметить все», «Снять отметку» не трогает
+scenarios.b3_unseen_keeps_own_marks = async function (S) {
+    const now = Date.now();
+    const spec = frierenWorld(now);
+    const favorites = { book: [FRIEREN_BOOK] };
+    const timeline = frierenMarks([1]);          // первую серию досмотрели сами
+    const own = Object.keys(timeline)[0];
+    const env = createEnv({ route: makeWorld(spec).route, favorites, timeline });
+    env.load(FILE);
+    const { built } = await openMain(env);
+    const card = (lineOf(env, built, 'shikimori_title_fresh') || { results: [] }).results.find(c => c.id == 209867);
+    if (!card) return check(S, 'bookmark is new before marking', false);
+    await menuAction(env, card, 'seen_all');
+    const env2 = createEnv({ route: makeWorld(spec).route, storage: persisted(env), favorites, timeline });
+    env2.load(FILE);
+    const second = await openMain(env2);
+    const any = second.built.flatMap(l => l.results || []).find(c => String(c.id) == '59978' || c.id == 209867);
+    if (any) await menuAction(env2, any, 'unseen');
+    check(S, 'own mark from before stays', !!timeline[own], timeline[own]);
+};
+
+// ONA из списка Shikimori: база соответствий не знает вида TMDB — всё равно сериал
+scenarios.b4_ona_unknown_media = async function (S) {
+    const now = Date.now();
+    const { hash } = require('./lampa');
+    const ona = anime({ id: 60001, name: 'Some ONA', russian: 'Какая-то ONA', kind: 'ona', status: 'ongoing',
+        episodes: 10, episodesAired: 3, airedOn: { year: 2026, date: '2026-07-01' } });
+    const spec = {
+        animes: [ona],
+        arm: [{ myanimelist: 60001, themoviedb: 300100, media: 'ONA', 'themoviedb-season': null }],
+        tmdb: [{ type: 'tv', id: 300100, name_ru: 'Какая-то ONA', original_name: 'オーエヌエー', date: '2026-07-01' }],
+        user: { id: 42, nickname: 'me' }, rates: [{ id: 1, target_id: 60001, status: 'watching', episodes: 0 }],
+        kodikTokens: ['56a768d08f43091901c44b54fe970049'],
+        kodik: [{ shikimori_id: 60001, translation: { id: 610, title: 'AniLibria.TV', type: 'voice' }, last_episode: 3, updated_at: iso(now - 3 * HOUR), episodes_aired: 3 }]
+    };
+    const timeline = {};
+    for (let ep = 1; ep <= 3; ep++) timeline[hash([1, '', ep, 'オーエヌエー'].join(''))] = 95;
+    const r = await twoLoads(spec, { storage: { shikimori_user: 'me' }, timeline });
+    const hit = freshOf(r.env, r.built, ['60001']);
+    check(S, 'ONA with 3 of 3 watched in Lampa → not in «Новые серии»', !hit, hit);
+};
+
 (async function () {
     const names = Object.keys(scenarios).filter(n => !ONLY || n.indexOf(ONLY) >= 0);
     for (const name of names) {
