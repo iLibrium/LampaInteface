@@ -2359,25 +2359,36 @@
 
     var Tmdb = {
         route: -1,
+        blocked: false,   // TMDB не ответил, а CUB ответил — карточки открываем через CUB
 
         // С какого пути начинать. Рабочий путь раньше помнился только до
         // перезапуска: там, где TMDB заблокирован, каждый запуск Lampa первый
         // запрос ждал TMDB_TIMEOUT впустую, и главная собиралась без имён и
-        // сезонов TMDB. Теперь CUB помнится сутки, а у кого источник в Lampa —
-        // CUB, с него и начинаем: сама Lampa ходит туда же
+        // сезонов TMDB. Теперь сработавший путь помнится сутки — в обе стороны:
+        // у кого источник в Lampa CUB, а CUB висит, тоже не ждём его каждый
+        // запуск. Без такой памяти у кого источник CUB — начинаем с CUB
         first: function () {
             if (this.route >= 0) return this.route;
             var saved = storGet(TMDB_ROUTE_KEY, null);
+            var fresh = !!saved && (saved.r === 0 || saved.r === 1) && Date.now() - (saved.t || 0) < TMDB_ROUTE_TTL;
             var source = '';
             try { source = Lampa.Storage.field('source'); } catch (e) {}
-            this.route = (saved && saved.r == 1 && Date.now() - (saved.t || 0) < TMDB_ROUTE_TTL) || source == 'cub' ? 1 : 0;
+            this.route = fresh ? saved.r : (source == 'cub' ? 1 : 0);
+            this.blocked = fresh && saved.r === 1;
             return this.route;
         },
 
         // Пишем только при смене пути — это редко
         use: function (route) {
             this.route = route;
+            this.blocked = route == 1;
             storSet(TMDB_ROUTE_KEY, { r: route, t: Date.now() });
+        },
+
+        // Не отвечает ли TMDB — по памяти о пути, без запросов
+        isBlocked: function () {
+            this.first();
+            return this.blocked;
         },
 
         lang: function () {
@@ -2411,13 +2422,16 @@
             }
 
             via(first, ok, function (reason) {
-                // 404 — ответ по существу: такого номера нет, запасной путь скажет то же
-                if (reason == 404) return err(reason);
+                // 404 от TMDB — ответ по существу: такого номера нет, запасной путь
+                // скажет то же. От зеркала CUB — нет: оно могло отстать или не знать
+                // номер, а «нет такого» запоминается навсегда — спросим сам TMDB
+                if (reason == 404 && !first) return err(reason);
                 via(second, function (json) {
                     if (self.route != second) self.use(second);
                     ok(json);
-                }, function () {
-                    err(reason);
+                }, function (reason2) {
+                    // Причина — от TMDB: «нет такого» засчитываем только от него
+                    err(first ? reason2 : reason);
                 });
             });
         }
@@ -3593,7 +3607,7 @@
         if (own) return own;
         var source = '';
         try { source = Lampa.Storage.field('source'); } catch (e) {}
-        return source == 'cub' || Tmdb.first() == 1 ? 'cub' : 'tmdb';
+        return source == 'cub' || Tmdb.isBlocked() ? 'cub' : 'tmdb';
     }
 
     // Открыть карточку TMDB. Саму карточку не запрашиваем: её загрузит
@@ -5204,7 +5218,9 @@
             function fallback() {
                 Tmdb.get(net, 'discover/tv?with_keywords=210024&with_origin_country=JP&sort_by=popularity.desc&page=1', function (json) {
                     var results = (json && json.results) || [];
-                    for (var i = 0; i < results.length; i++) results[i].source = 'tmdb';
+                    // Пришли через зеркало CUB, потому что TMDB не отвечает, — через
+                    // CUB и откроются
+                    for (var i = 0; i < results.length; i++) results[i].source = tmdbSource(null);
                     done(results, false);
                 }, function () {
                     done([], false);
@@ -6740,6 +6756,7 @@
                 Seasons.memo = null;
                 storSet(TMDB_ROUTE_KEY, null);
                 Tmdb.route = -1;
+                Tmdb.blocked = false;
                 Seen.reset();
                 Kodik.reset();
                 UserData.dropRatesCache();

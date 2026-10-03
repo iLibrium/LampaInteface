@@ -2697,6 +2697,170 @@ scenarios.c1_tmdb_route_remembered = async function (S) {
 };
 
 
+/* ---------------- CUB: находки ревью агента lampa-runtime-reviewer ----------------
+ * Путь в TMDB помнится в обе стороны; 404 от зеркала CUB — не «такого номера нет»;
+ * карточки открываются через CUB, только когда TMDB правда не отвечал */
+function cubRouteWrites(env) {
+    const orig = env.Lampa.Storage.set;
+    env.routeWrites = [];
+    env.Lampa.Storage.set = function (name, value) {
+        if (name == 'shikimori_tmdb_route') env.routeWrites.push({ value: JSON.parse(JSON.stringify(value)), at: Date.now() });
+        return orig.apply(this, arguments);
+    };
+}
+function cubTmdbish(env) {
+    return env.log.requests.filter(r => /themoviedb|\/\/tmdb\.|apitmdb\./.test(r.url))
+        .map(r => ({ host: r.url.replace(/^https?:\/\/([^/]+).*/, '$1'), path: r.url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*/, ''), t: r.t, status: r.status }));
+}
+function cubFrieren(now) {
+    return makeWorld(Object.assign({}, scWorld(now), { animes: [F.FRIEREN_S1], arm: [{ myanimelist: 52991, themoviedb: 209867, media: 'TV', 'themoviedb-season': 1 }], tmdb: [F.FRIEREN_TMDB] }));
+}
+
+// X2: много одновременных запросов на смене пути: сколько записей ключа
+function cubMini(now, k) {
+    const T = { id: 900000 + k, name_ru: 'Мини ' + k, name_en: 'Mini ' + k, original_name: 'ミニ' + k, date: '2025-01-10', alt: ['Mini ' + k],
+        seasonList: [{ season_number: 1, episode_count: 12, air_date: '2025-01-10', name: 'Сезон 1' }] };
+    return { T, w: advWorld(now, { tmdb: T, parts: [{ id: 70000 + k, name: 'Mini ' + k, japanese: 'ミニ' + k, episodes: 12, date: '2025-01-10', arm: 1, dub: 12 }] }) };
+}
+function cubMulti(now, n) {
+    const ms = []; for (let k = 1; k <= n; k++) ms.push(cubMini(now, k));
+    const spec = { animes: [], arm: [], tmdb: [], kodik: [], kodikTokens: ms[0].w.kodikTokens };
+    for (const m of ms) { spec.animes = spec.animes.concat(m.w.animes); spec.arm = spec.arm.concat(m.w.arm); spec.tmdb = spec.tmdb.concat(m.w.tmdb); spec.kodik = spec.kodik.concat(m.w.kodik); }
+    return { spec, books: ms.map(m => { const b = advBook(m.T, 1); delete b.first_air_date; return b; }) };
+}
+scenarios.c2_concurrent_switch_writes = async function (S) {
+    const now = Date.now();
+    const { spec, books } = cubMulti(now, 8);
+    const world = makeWorld(spec);
+    const deadTmdb = process.env.X2_DEAD || 'tmdb';
+    const route = (m, u, b) => {
+        if (deadTmdb == 'tmdb' && /api\.themoviedb\.org/.test(u)) return { timeout: true, delay: 3000 };
+        if (deadTmdb == 'cub' && /\/\/tmdb\./.test(u)) return { timeout: true, delay: 3000 };
+        return world.route(m, u, b);
+    };
+    const storage = deadTmdb == 'cub' ? { shikimori_tmdb_route: { r: 1, t: now - 3600e3 } } : {};
+    const env = createEnv({ route, storage, favorites: { book: books } });
+    cubRouteWrites(env);
+    env.load(FILE);
+    await openMain(env);
+    await env.idle(30000);
+    const reqs = cubTmdbish(env);
+    const okFallback = reqs.filter(r => r.status == 200).length;
+    console.log('X2 dead=' + deadTmdb, 'tmdb-ish requests:', reqs.length, 'answered:', okFallback, 'route writes:', JSON.stringify(env.routeWrites.map(w => w.value.r)));
+    check(S, 'one write per switch (dead=' + deadTmdb + ')', env.routeWrites.length == 1, env.routeWrites.length);
+};
+
+// X3: источник Lampa = CUB, зеркало CUB висит, TMDB жив: каждый запуск снова начинает с CUB
+scenarios.c3_source_cub_cub_dead_each_launch = async function (S) {
+    const now = Date.now();
+    const marks = advMarks(SC, [[1, 1, 13], [2, 1, 16]]);
+    const fav = { favorites: { book: [advBook(SC_TMDB, 2)] } };
+    const world = makeWorld(scWorld(now));
+    const route = (m, u, b) => (/\/\/tmdb\./.test(u) && /\/3\//.test(u) ? { timeout: true, delay: 8000 } : world.route(m, u, b));
+    let storage = { source: 'cub' };
+    for (let launch = 1; launch <= 2; launch++) {
+        const env = createEnv({ route, storage, timeline: marks, favorites: fav.favorites });
+        cubRouteWrites(env);
+        const t0 = Date.now();
+        env.load(FILE);
+        const { built } = await openMain(env);
+        const builtAt = Date.now() - t0;
+        await env.idle(20000);
+        const reqs = cubTmdbish(env);
+        const firstTmdb = reqs.find(r => /themoviedb/.test(r.host));
+        const hit = freshOf(env, built, ['350001', '61103']);
+        console.log('X3 launch', launch, 'built after ms', builtAt, 'first CUB /3/ req at', reqs.length && reqs[0].host, 'first TMDB req after ms', firstTmdb ? firstTmdb.t - t0 : null,
+            'route writes', JSON.stringify(env.routeWrites.map(w => w.value)), 'fresh row:', advDesc(hit));
+        storage = persisted(env);
+        if (launch == 2) {
+            check(S, 'second launch: remembered TMDB used, main has TMDB seasons', hit && hit.new == 1, advDesc(hit));
+            check(S, 'second launch: no wait on the hanging CUB mirror', builtAt < 3000, builtAt);
+        }
+    }
+};
+
+// X4: источник сменили с CUB на TMDB посреди сессии — карточки продолжают открываться через CUB
+scenarios.c4_source_switched_midsession = async function (S) {
+    const now = Date.now();
+    const world = cubFrieren(now);
+    const env = createEnv({ route: world.route, storage: { source: 'cub' } });
+    env.load(FILE);
+    const comp = await openCatalog(env);
+    await press(env, cardByTitle(comp, 'Фрирен'));
+    const p1 = lastPush(env);
+    env.Lampa.Storage.set('source', 'tmdb');
+    await press(env, cardByTitle(comp, 'Фрирен'));
+    const p2 = lastPush(env);
+    console.log('X4 before switch', p1 && p1.source, 'after switch to tmdb', p2 && p2.source, 'tmdb-ish requests', cubTmdbish(env).length);
+    check(S, 'after switching Lampa source to tmdb: card opens through tmdb', p2 && p2.source == 'tmdb', p2 && p2.source);
+};
+
+// RV5: главная при источнике CUB сделала запрос TMDB (путь стал 1), затем источник сменили на TMDB
+scenarios.c5_source_switched_after_requests = async function (S) {
+    const now = Date.now();
+    const spec = Object.assign({}, scWorld(now));
+    spec.animes = spec.animes.concat([F.FRIEREN_S1]);
+    spec.arm = spec.arm.concat([{ myanimelist: 52991, themoviedb: 209867, media: 'TV', 'themoviedb-season': 1 }]);
+    spec.tmdb = spec.tmdb.concat([F.FRIEREN_TMDB]);
+    const world = makeWorld(spec);
+    const env = createEnv({ route: world.route, storage: { source: 'cub' }, favorites: { book: [advBook(SC_TMDB, 2)] } });
+    cubRouteWrites(env);
+    env.load(FILE);
+    await openMain(env);
+    await env.idle(20000);
+    const before = cubTmdbish(env).length;
+    env.Lampa.Storage.set('source', 'tmdb');
+    const comp = await openCatalog(env);
+    await press(env, cardByTitle(comp, 'Фрирен'));
+    const p = lastPush(env);
+    console.log('X5 tmdb-ish requests while source=cub:', before, 'hosts:', JSON.stringify(Array.from(new Set(cubTmdbish(env).map(r => r.host)))), 'push after switch:', p && p.source, 'writes', env.routeWrites.length);
+    check(S, 'after switching Lampa source to tmdb: card opens through tmdb', p && p.source == 'tmdb', p && p.source);
+};
+// RV6: зеркало CUB отвечает 404 на всё /3/ (снятое зеркало, vhost по умолчанию); TMDB жив
+scenarios.c6_cub_404_everything = async function (S) {
+    const now = Date.now();
+    const { spec, books } = cubMulti(now, 3);
+    const world = makeWorld(spec);
+    const route = (m, u, b) => (/\/\/tmdb\./.test(u) && /\/3\//.test(u) ? { status: 404, body: '<html>404 Not Found</html>' } : world.route(m, u, b));
+    const mode = process.env.RV6 || 'source';
+    const storage = mode == 'source' ? { source: 'cub' } : { shikimori_tmdb_route: { r: 1, t: now - 3600e3 } };
+    const env = createEnv({ route, storage, favorites: { book: books } });
+    cubRouteWrites(env);
+    env.load(FILE);
+    await openMain(env);
+    await env.idle(20000);
+    const st = persisted(env);
+    const reqs = env.log.requests.filter(r => /api\.themoviedb\.org|\/\/tmdb\./.test(r.url)).map(r => r.url.replace(/^https?:\/\/([^/]+)\/3\/([^?]*).*/, '$1 $2') + ' ' + r.status);
+    console.log('X6 mode=' + mode, 'requests:', JSON.stringify(reqs));
+    console.log('X6 tmdb_info:', JSON.stringify(st.shikimori_tmdb_info), 'route', JSON.stringify(st.shikimori_tmdb_route));
+    const info = st.shikimori_tmdb_info || {};
+    const permanent = Object.keys(info).filter(k => info[k] && !info[k].original_name && !info[k].retry);
+    check(S, 'no permanent "no such id" records while TMDB answers (' + mode + ')', permanent.length == 0, permanent);
+};
+// RV7: TMDB заблокирован, путь — CUB; каталог CUB пуст, запасной discover/tv пришёл через CUB
+scenarios.c7_popular_fallback_via_cub = async function (S) {
+    const now = Date.now();
+    const world = makeWorld({ kodikTokens: ['56a768d08f43091901c44b54fe970049'], kodik: [], animes: [], cubPopular: [], tmdb: [F.FRIEREN_TMDB] });
+    const route = (m, u, b) => {
+        if (/api\.themoviedb\.org/.test(u)) return { network: true };
+        if (/\/\/tmdb\.[^/]+\/3\/discover\/tv/.test(u)) return { status: 200, body: { results: [{ id: 209867, name: 'Фрирен', original_name: '葬送のフリーレン', first_air_date: '2023-09-29', poster_path: '/p.jpg', genre_ids: [16] }] } };
+        return world.route(m, u, b);
+    };
+    const env = createEnv({ route, storage: { shikimori_tmdb_route: { r: 1, t: now - 3600e3 } } });
+    env.load(FILE);
+    const { built, comp } = await openMain(env);
+    const popular = lineOf(env, built, 'shikimori_title_popular_tmdb');
+    const reqs = env.log.requests.filter(r => /discover/.test(r.url)).map(r => r.url.replace(/^https?:\/\/([^/]+).*/, '$1'));
+    if (!popular) return check(S, 'popular row built', false, built.map(l => l.title));
+    const item = {};
+    comp.onAppend(item, popular);
+    item.onSelect(null, popular.results[0]);
+    const push = lastPush(env);
+    console.log('X7 discover via', JSON.stringify(reqs), 'push', push && { id: push.id, source: push.source });
+    check(S, 'card fetched through CUB opens through CUB', push && push.source == 'cub', push && push.source);
+};
+
+
 (async function () {
     const names = Object.keys(scenarios).filter(n => !ONLY || n.indexOf(ONLY) >= 0);
     for (const name of names) {
