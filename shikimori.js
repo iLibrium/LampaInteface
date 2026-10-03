@@ -29,6 +29,8 @@
     var REVERSE_SEARCH_MAX = 8;               // поисков по названию за обновление (лимит Shikimori — 5 в секунду)
     var SEQUEL_DEPTH = 3;                     // на сколько сезонов вперёд ищем продолжения закладки
     var TMDB_TIMEOUT = 8000;                  // прямой TMDB часто не отвечает вовсе — ждём недолго
+    var TMDB_ROUTE_KEY = 'shikimori_tmdb_route';
+    var TMDB_ROUTE_TTL = 24 * 60 * 60 * 1000; // TMDB не ответил, а CUB ответил — сутки сразу идём через CUB
     var GENRES_TTL = 24 * 60 * 60 * 1000;     // кэш жанров: сутки
 
     // Kodik — источник «серия уже доступна с озвучкой». Адрес и токен переопределяются
@@ -2356,7 +2358,27 @@
      * ============================================================ */
 
     var Tmdb = {
-        route: 0,
+        route: -1,
+
+        // С какого пути начинать. Рабочий путь раньше помнился только до
+        // перезапуска: там, где TMDB заблокирован, каждый запуск Lampa первый
+        // запрос ждал TMDB_TIMEOUT впустую, и главная собиралась без имён и
+        // сезонов TMDB. Теперь CUB помнится сутки, а у кого источник в Lampa —
+        // CUB, с него и начинаем: сама Lampa ходит туда же
+        first: function () {
+            if (this.route >= 0) return this.route;
+            var saved = storGet(TMDB_ROUTE_KEY, null);
+            var source = '';
+            try { source = Lampa.Storage.field('source'); } catch (e) {}
+            this.route = (saved && saved.r == 1 && Date.now() - (saved.t || 0) < TMDB_ROUTE_TTL) || source == 'cub' ? 1 : 0;
+            return this.route;
+        },
+
+        // Пишем только при смене пути — это редко
+        use: function (route) {
+            this.route = route;
+            storSet(TMDB_ROUTE_KEY, { r: route, t: Date.now() });
+        },
 
         lang: function () {
             var lang = '';
@@ -2378,7 +2400,7 @@
 
         get: function (net, path, ok, err, lang) {
             var self = this;
-            var first = this.route;
+            var first = this.first();
             var second = first ? 0 : 1;
 
             function via(route, done, fail) {
@@ -2392,7 +2414,7 @@
                 // 404 — ответ по существу: такого номера нет, запасной путь скажет то же
                 if (reason == 404) return err(reason);
                 via(second, function (json) {
-                    self.route = second;
+                    if (self.route != second) self.use(second);
                     ok(json);
                 }, function () {
                     err(reason);
@@ -3564,13 +3586,14 @@
     // Источник, через который Lampa загрузит карточку. У закладки он свой —
     // его и берём; иначе выбранный в настройках, если он работает с номерами
     // TMDB. CUB раздаёт TMDB через свои зеркала и открывается там, где прямой
-    // TMDB заблокирован
+    // TMDB заблокирован: если сам плагин ходит в TMDB через CUB, потому что
+    // TMDB не ответил, то и карточку открываем через CUB
     function tmdbSource(card) {
         var own = card && card._tmdb_card ? card.source : '';
         if (own) return own;
         var source = '';
         try { source = Lampa.Storage.field('source'); } catch (e) {}
-        return source == 'cub' ? 'cub' : 'tmdb';
+        return source == 'cub' || Tmdb.first() == 1 ? 'cub' : 'tmdb';
     }
 
     // Открыть карточку TMDB. Саму карточку не запрашиваем: её загрузит
@@ -6715,6 +6738,8 @@
                 TmdbInfo.cache = null;
                 storSet(SEASONS_KEY, {});
                 Seasons.memo = null;
+                storSet(TMDB_ROUTE_KEY, null);
+                Tmdb.route = -1;
                 Seen.reset();
                 Kodik.reset();
                 UserData.dropRatesCache();

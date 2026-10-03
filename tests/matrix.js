@@ -70,7 +70,8 @@ const FAMILIES = {
 //   lacks        — TMDB ещё не завёл новый сезон
 //   abs_full     — всё в первом сезоне сквозной нумерацией
 //   abs_aired    — то же, только вышедшие серии
-//   down, down_abs — TMDB не отвечает (отметки — раздельные или сквозные)
+//   down, down_abs — TMDB не отвечает (отметки — раздельные или сквозные), CUB тоже
+//   cub          — раздельные сезоны, прямой TMDB заблокирован, отвечает зеркало CUB
 function layoutOf(E, tmdbKind, dub) {
     const split = [];
     const offs = {};
@@ -100,6 +101,7 @@ function layoutOf(E, tmdbKind, dub) {
         case 'abs_aired': return { seasons: [[1, E[0].date, absOff - E[ni].eps + dub]], map: absMap };
         case 'down': return { seasons: split, map: splitMap, down: true };
         case 'down_abs': return { seasons: [[1, E[0].date, absOff]], map: absMap, down: true };
+        case 'cub': return { seasons: split, map: splitMap, blocked: true };
     }
     throw new Error(tmdbKind);
 }
@@ -176,6 +178,7 @@ async function runOne(file, cfg) {
     const re = new RegExp('/tv/' + T.id + '(\\?|$)');
     const routeOf = () => {
         const w = makeWorld(spec).route;
+        if (T.blocked) return (m, u, b) => (/api\.themoviedb\.org|apitmdb\./.test(u) ? { network: true } : w(m, u, b));
         return T.down ? (m, u, b) => (/themoviedb|tmdb\./.test(u) && re.test(u) ? { network: true } : w(m, u, b)) : w;
     };
     const timeline = () => {
@@ -228,7 +231,7 @@ function cell(pathKind, famKey, armKind, tmdbKind, watch, dub) {
         else if (i == ni) upto = watch.cur || 0;
         for (let ep = 1; ep <= upto; ep++) marks.push(lay.map(i, ep));
     }
-    const cfg = { entries, marks, tmdb: { id: 300000 + E[0].id, name: fam.name, seasons: lay.seasons, down: lay.down } };
+    const cfg = { entries, marks, tmdb: { id: 300000 + E[0].id, name: fam.name, seasons: lay.seasons, down: lay.down, blocked: lay.blocked } };
     if (pathKind == 'list') cfg.list = E[ni].id;
     return { cfg, expectNew: Math.max(0, dub - (watch.cur || 0)) };
 }
@@ -263,7 +266,7 @@ function fmt(r) {
     ];
     const dubs = process.env.DUBS ? process.env.DUBS.split(',').map(Number) : [3];
     const arms = ['correct', 'all1', 'noseason', 'nonewest', 'all1_nonewest'];
-    const tmdbs = ['split', 'split_aired', 'lacks', 'abs_full', 'abs_aired', 'down', 'down_abs'];
+    const tmdbs = ['split', 'split_aired', 'lacks', 'abs_full', 'abs_aired', 'down', 'down_abs', 'cub'];
     let regr = 0, fixed = 0, both = 0, total = 0;
     for (const p of ['book', 'list']) for (const f of Object.keys(FAMILIES)) for (const a of arms) for (const t of tmdbs) for (const wt of watches) for (const d of dubs) {
         const name = [p, f, a, t, wt.label, 'dub' + d].join(' | ');

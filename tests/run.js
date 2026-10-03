@@ -2653,6 +2653,50 @@ scenarios.sl7_long_family_scan_budget = async function (S) {
 };
 
 
+/* ---------------- CUB: путь в TMDB помнится между запусками ----------------
+ * Прямой TMDB висит до таймаута, зеркало CUB отвечает. Раньше рабочий путь помнился до
+ * перезапуска Lampa: каждый запуск первый запрос ждал 8 секунд впустую, главная собиралась
+ * без сезонов TMDB, и вторая часть сплит-кура с «лишней» серией TMDB пряталась */
+async function cubRun(spec, storage, timeline, extraOpts) {
+    const world = makeWorld(spec);
+    const route = (m, u, b) => (/api\.themoviedb\.org/.test(u) ? { timeout: true, delay: 8000 } : world.route(m, u, b));
+    const env = createEnv(Object.assign({ route, storage, timeline }, extraOpts || {}));
+    env.load(FILE);
+    const { built } = await openMain(env);
+    return { env, built };
+}
+scenarios.c1_tmdb_route_remembered = async function (S) {
+    const now = Date.now();
+    const marks = advMarks(SC, [[1, 1, 13], [2, 1, 16]]);
+    const fav = { favorites: { book: [advBook(SC_TMDB, 2)] } };
+    // Первый запуск: TMDB не ответил, ответил CUB
+    const first = await cubRun(scWorld(now), {}, marks, fav);
+    await first.env.idle(20000);
+    const st = persisted(first.env);
+    check(S, 'first start: CUB remembered as the TMDB route', st.shikimori_tmdb_route && st.shikimori_tmdb_route.r == 1, st.shikimori_tmdb_route);
+    // Второй запуск: сезоны TMDB устарели — их надо спросить снова
+    delete st.shikimori_tmdb_seasons;
+    delete st.shikimori_tmdb_info;
+    const second = await cubRun(scWorld(now), st, marks, fav);
+    const dead = second.env.log.requests.filter(r => /api\.themoviedb\.org/.test(r.url)).length;
+    check(S, 'second start: no requests to the blocked TMDB', dead == 0, dead);
+    advCheck(S, 'second start: part 2 E1-4 watched (S2E13-16), dub 5', freshOf(second.env, second.built, ['350001', '61103']), { present: true, n: 1 });
+    // Источник CUB в настройках Lampa — сразу через CUB, и карточки открываются через CUB
+    const third = await cubRun(scWorld(now), { source: 'cub' }, marks, fav);
+    const dead3 = third.env.log.requests.filter(r => /api\.themoviedb\.org/.test(r.url)).length;
+    check(S, 'Lampa source CUB: no requests to the blocked TMDB', dead3 == 0, dead3);
+    // Плагин ходит в TMDB через CUB — и карточку открывает через CUB: прямой TMDB у Lampa тот же
+    const world = makeWorld(Object.assign({}, scWorld(now), { animes: [F.FRIEREN_S1], arm: [{ myanimelist: 52991, themoviedb: 209867, media: 'TV', 'themoviedb-season': 1 }], tmdb: [F.FRIEREN_TMDB] }));
+    const route = (m, u, b) => (/api\.themoviedb\.org/.test(u) ? { timeout: true, delay: 8000 } : world.route(m, u, b));
+    const env4 = createEnv({ route, storage: { shikimori_tmdb_route: st.shikimori_tmdb_route } });
+    env4.load(FILE);
+    const comp = await openCatalog(env4);
+    await press(env4, cardByTitle(comp, 'Фрирен'));
+    const push = lastPush(env4);
+    check(S, 'CUB remembered: the full card opens through CUB', push && push.id == 209867 && push.source == 'cub', push && { id: push.id, source: push.source });
+};
+
+
 (async function () {
     const names = Object.keys(scenarios).filter(n => !ONLY || n.indexOf(ONLY) >= 0);
     for (const name of names) {
