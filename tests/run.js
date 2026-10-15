@@ -2985,6 +2985,31 @@ scenarios.bd_rates_slow = S => badgeThenMain(S, 'shikimori 3.5 s per request', b
 scenarios.bd_arm_hang_bookmark = S => badgeThenMain(S, 'ARM hangs, Frieren bookmark', frierenWorld(Date.now()), { favorites: { book: [FRIEREN_BOOK] } },
     (m, u) => /haglund/.test(u) ? 12000 : 0);
 
+// Досмотрели после полного пересчёта, а главная его копию подмешивает:
+// досмотренное не должно вернуться в «Новые серии»
+scenarios.bd_seen_after_full = async function (S) {
+    const now = Date.now();
+    const world = makeWorld(bdOngoing(now));
+    const e1 = createEnv({ route: world.route, storage: bdWarm(now) });
+    e1.load(FILE);
+    const badge = await bdBackground(e1);
+    const st = persisted(e1);
+    st.shikimori_seen = { s61001: { ep: 6, at: now } };
+    // Shikimori медленный — главная собирается без своих данных и берёт сохранённое
+    const e2 = createEnv({ route: bdRoute(world, (m, u) => /shikimori/.test(u) ? 12000 : 0), storage: st });
+    e2.load(FILE);
+    const m = await bdMain(e2);
+    // Контроль: без отметки тот же запуск показывает тайтл из сохранённого
+    const st0 = persisted(e1);
+    const e0 = createEnv({ route: bdRoute(world, (m, u) => /shikimori/.test(u) ? 12000 : 0), storage: st0 });
+    e0.load(FILE);
+    const m0 = await bdMain(e0);
+    check(S, 'control: not watched — shown from the saved full pass', m0.count == 1, m0.lines);
+    check(S, 'badge had it', badge == 1, badge);
+    check(S, 'full pass remembered its fresh titles', !!e2.Lampa.Storage.get('shikimori_fresh_items', null), m.lines);
+    check(S, 'watched after the full pass: not in «Новые серии»', m.count == 0, m.lines);
+};
+
 (async function () {
     const names = Object.keys(scenarios).filter(n => !ONLY || n.indexOf(ONLY) >= 0);
     for (const name of names) {

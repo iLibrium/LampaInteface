@@ -5299,7 +5299,7 @@
             // Первый показ после запуска: полного пересчёта в памяти ещё нет —
             // берём то, что запомнил последний (счётчик показывает его же)
             if (!full && (!lines.tracked || lines.tracked.partial)) full = storGet('shikimori_fresh_items', null);
-            if (!(full instanceof Array)) full = null;
+            if (Object.prototype.toString.call(full) != '[object Array]') full = null;
             var i;
 
             // Счётчик обновляем только полными данными: обрезанные по времени
@@ -5310,16 +5310,16 @@
             // Данные экрана неполные — добавляем то, что нашёл полный пересчёт:
             // всё, что на счётчике, должно быть и здесь
             var fresh = [];
-            var fresh_keys = {};
+            // Ключи — всех тайтлов экрана, не только свежих: досмотренный после
+            // полного пересчёта тайтл иначе вернулся бы из его старой копии
+            var have_keys = {};
             for (i = 0; i < tracked.length; i++) {
-                if (isFresh(tracked[i])) {
-                    fresh.push(tracked[i]);
-                    fresh_keys[itemKey(tracked[i])] = true;
-                }
+                have_keys[itemKey(tracked[i])] = true;
+                if (isFresh(tracked[i])) fresh.push(tracked[i]);
             }
             if (full && full !== tracked && (tracked.partial || !lines.tracked)) {
                 for (i = 0; i < full.length; i++) {
-                    if (isFresh(full[i]) && !fresh_keys[itemKey(full[i])]) fresh.push(full[i]);
+                    if (!have_keys[itemKey(full[i])] && isFresh(full[i]) && stillFresh(full[i])) fresh.push(full[i]);
                 }
             }
             fresh.sort(function (a, b) { return b.at - a.at; });
@@ -7388,6 +7388,20 @@
         return visible(item);
     }
 
+    // Копия из прошлого полного пересчёта: то, что сделано после него в самом
+    // плагине («просмотрено») и в закладках («Просмотрено», «Брошено»),
+    // она не знает — сверяемся с живыми данными
+    function stillFresh(item) {
+        var sid = item.kodik && item.kodik.sid;
+        if (sid && item.total && Seen.get(sid) >= item.total) return false;
+        if (item.tmdb && item.card) {
+            var marked = {};
+            try { marked = Lampa.Favorite.check(item.card) || {}; } catch (e) {}
+            if (marked.viewed || marked.thrown) return false;
+        }
+        return true;
+    }
+
     function countFresh(items) {
         var count = 0;
         for (var i = 0; i < items.length; i++) {
@@ -7396,6 +7410,8 @@
         return count;
     }
 
+    var fresh_sig = null;
+
     function updateMenuBadge(items) {
         var count = countFresh(items);
         storSet('shikimori_badge', count);
@@ -7403,10 +7419,18 @@
         // покажет их, и счётчик не разойдётся со строкой «Новые серии».
         // Пишется только при полном пересчёте, не чаще пересчёта счётчика
         var keep = [];
+        var sig = [];
         for (var i = 0; i < items.length && keep.length < 30; i++) {
-            if (isFresh(items[i])) keep.push(items[i]);
+            if (!isFresh(items[i])) continue;
+            keep.push(items[i]);
+            sig.push(itemKey(items[i]) + ':' + items[i].watched + ':' + items[i].total + ':' + items[i].at);
         }
-        storSet('shikimori_fresh_items', keep);
+        // Хранилище медленное и пишется целиком — только если список изменился
+        sig = sig.join(',');
+        if (sig !== fresh_sig) {
+            fresh_sig = sig;
+            storSet('shikimori_fresh_items', keep);
+        }
         paintMenuBadge(count);
     }
 
@@ -7424,7 +7448,9 @@
 
         function done(items) {
             badge_started = 0;
-            updateMenuBadge(items);
+            // Обрезанный по времени пересчёт счётчик не трогает: он обнулил бы
+            // найденное прошлым полным
+            if (!items.partial) updateMenuBadge(items);
         }
 
         UserData.rates(background_net, function (rates) {
