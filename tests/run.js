@@ -242,6 +242,46 @@ scenarios.t7_recheck_known = async function (S) {
 };
 
 /* ------------------------------------------------------------------
+ * T7b. Лента Kodik медленная: главная не ждёт её дольше MAIN_WAIT, и раньше
+ * «Новые серии» и «Я смотрю» пропадали целиком, а счётчик в меню (фоновый
+ * пересчёт ждёт до 30 с) показывал новые серии, которых на экране нет
+ * ------------------------------------------------------------------ */
+scenarios.t7b_slow_feed = async function (S) {
+    const now = Date.now();
+    const a = anime({ id: 60004, name: 'Slow Feed', russian: 'Медленная лента', kind: 'tv', status: 'ongoing',
+        episodes: 12, episodesAired: 6 });
+    const spec = {
+        animes: [a],
+        user: { id: 42, nickname: 'me' },
+        rates: [{ id: 1, target_id: 60004, status: 'watching', episodes: 5 }],
+        kodikTokens: ['56a768d08f43091901c44b54fe970049'],
+        kodik: [{ shikimori_id: 60004, translation: { id: 610, title: 'AniLibria.TV', type: 'voice' }, last_episode: 6,
+            updated_at: iso(now - 2 * HOUR), episodes_aired: 6 },
+            { shikimori_id: 60005, translation: { id: 610, title: 'AniLibria.TV', type: 'voice' }, last_episode: 3,
+            updated_at: iso(now - HOUR), episodes_aired: 3 }]
+    };
+    const world = makeWorld(spec);
+    const route = (m, u, b) => /kodik[^/]*\/list/.test(u) ? Object.assign({ delay: 12000 }, world.route(m, u, b)) : world.route(m, u, b);
+    const env = createEnv({ route, storage: {
+        shikimori_user: 'me',
+        shikimori_kodik_eps: { s60004: { sid: 60004, ep: 6, base: 5, studio: 'AniLibria.TV', voice: true, at: now - 2 * HOUR, aired: 6, checked: now } }
+    } });
+    env.load(FILE);
+    const comp = new env.components.shikimori_main({ component: 'shikimori_main', page: 1 });
+    comp.create();
+    const built = (await env.waitFor(() => comp.built, 15000)) || [];
+    const fresh = lineOf(env, built, 'shikimori_title_fresh');
+    const hit = fresh && fresh.results.find(c => String(c.id) == '60004');
+    check(S, 'fresh row is built while the Kodik feed is still loading', !!hit,
+        { lines: built.map(l => l.title + ':' + (l.results || []).length) });
+    // Опоздавшая лента всё равно запоминается: точка сверки уже сдвинута,
+    // и в следующую ленту эти строки не попадут
+    await env.waitFor(() => { const st = env.Lampa.Storage.get('shikimori_kodik_eps', {}); return st.s60005; }, 15000);
+    const st = env.Lampa.Storage.get('shikimori_kodik_eps', {});
+    check(S, 'late feed rows are remembered', !!st.s60005, Object.keys(st));
+};
+
+/* ------------------------------------------------------------------
  * T8. Счётчик эфира у Kodik отстал на серию
  * ------------------------------------------------------------------ */
 scenarios.t8_aired_lag = async function (S) {
@@ -2860,6 +2900,115 @@ scenarios.c7_popular_fallback_via_cub = async function (S) {
     check(S, 'card fetched through CUB opens through CUB', push && push.source == 'cub', push && push.source);
 };
 
+
+/* ------------------------------------------------------------------
+ * BD. Счётчик в меню против строки «Новые серии» при медленной сети.
+ * Жалоба: на счётчике три новых тайтла, а на главной ни «Новых серий»,
+ * ни «Я смотрю» — главная собиралась по MAIN_WAIT без личных данных
+ * (медленные Shikimori, ARM, лента Kodik), а фоновый пересчёт счётчика
+ * ждёт до 30 с. Всё, что на счётчике, должно быть и на главной
+ * ------------------------------------------------------------------ */
+function bdRoute(world, delay) {
+    const t0 = Date.now();
+    return (m, u, b) => {
+        const r = world.route(m, u, b);
+        const d = delay ? delay(m, u, Date.now() - t0) : 0;
+        if (d === 'hang') return Object.assign({}, r, { delay: 60000 });
+        if (d === 500) return { status: 500, body: { error: 'x' } };
+        return d ? Object.assign({}, r, { delay: d }) : r;
+    };
+}
+
+async function bdMain(env, wait) {
+    const comp = new env.components.shikimori_main({ component: 'shikimori_main', page: 1 });
+    comp.create();
+    const built = (await env.waitFor(() => comp.built, wait || 15000)) || [];
+    const fresh = lineOf(env, built, 'shikimori_title_fresh');
+    return { built, count: fresh ? fresh.results.length : 0, lines: built.map(l => (l.title || '-') + ':' + (l.results || []).length) };
+}
+
+async function bdBackground(env) {
+    env.store.set('shikimori_badge', JSON.stringify('wait'));
+    env.Lampa.Listener.send('app', { type: 'ready' });
+    await env.waitFor(() => typeof env.Lampa.Storage.get('shikimori_badge', 'wait') == 'number', 45000);
+    return env.Lampa.Storage.get('shikimori_badge', null);
+}
+
+// Сначала фоновый пересчёт на быстрой сети (так счётчик и получает число),
+// потом — запуск с тем же хранилищем и медленной сетью, и главная
+async function badgeThenMain(S, name, spec, envOpts, delay) {
+    const world = makeWorld(spec);
+    const e1 = createEnv(Object.assign({ route: world.route }, envOpts));
+    e1.load(FILE);
+    const badge = await bdBackground(e1);
+    const e2 = createEnv(Object.assign({}, envOpts, { route: bdRoute(world, delay), storage: persisted(e1) }));
+    e2.load(FILE);
+    const m = await bdMain(e2);
+    check(S, name + ': badge counts something', badge >= 1, badge);
+    check(S, name + ': main shows what the badge counts (' + m.count + ' >= ' + badge + ')', m.count >= badge, m.lines);
+    check(S, name + ': main does not lower the badge', e2.Lampa.Storage.get('shikimori_badge', 0) >= badge, e2.Lampa.Storage.get('shikimori_badge', 0));
+}
+
+const BD_VOICE = { id: 610, title: 'AniLibria.TV', type: 'voice' };
+function bdOngoing(now) {
+    const a = anime({ id: 61001, name: 'Adv Ongoing', russian: 'Онгоинг', kind: 'tv', status: 'ongoing', episodes: 12, episodesAired: 6 });
+    return {
+        animes: [a], user: { id: 42, nickname: 'me' },
+        rates: [{ id: 1, target_id: 61001, status: 'watching', episodes: 5 }],
+        kodikTokens: ['56a768d08f43091901c44b54fe970049'],
+        kodik: [{ shikimori_id: 61001, translation: BD_VOICE, last_episode: 6, updated_at: iso(now - 2 * HOUR), episodes_aired: 6 }]
+    };
+}
+// Kodik помнит 5 серий и проверял час назад — точечно не перепроверит
+function bdWarm(now) {
+    return { shikimori_user: 'me',
+        shikimori_kodik_eps: { s61001: { sid: 61001, ep: 5, base: 4, studio: 'AniLibria.TV', voice: true, at: now - 3 * DAY, aired: 5, checked: now - HOUR } } };
+}
+const bdList = u => /kodik[^/]*\/list/.test(u);
+
+// Лента 4 с — обычное дело на телевизоре. Первая версия правки ждала её
+// всего 2 с и теряла серию, которую до неё главная показывала
+scenarios.bd_feed_4s_warm = async function (S) {
+    const now = Date.now();
+    const world = makeWorld(bdOngoing(now));
+    const env = createEnv({ route: bdRoute(world, (m, u) => bdList(u) ? 4000 : 0), storage: bdWarm(now) });
+    env.load(FILE);
+    const m = await bdMain(env);
+    check(S, 'feed 4 s: main shows the new episode', m.count == 1, m.lines);
+};
+scenarios.bd_feed_12s = S => badgeThenMain(S, 'feed 12 s', bdOngoing(Date.now()), { storage: bdWarm(Date.now()) },
+    (m, u) => bdList(u) ? 12000 : 0);
+scenarios.bd_feed_hang = S => badgeThenMain(S, 'feed hangs', bdOngoing(Date.now()), { storage: bdWarm(Date.now()) },
+    (m, u) => bdList(u) ? 'hang' : 0);
+scenarios.bd_rates_slow = S => badgeThenMain(S, 'shikimori 3.5 s per request', bdOngoing(Date.now()), { storage: bdWarm(Date.now()) },
+    (m, u) => /shikimori/.test(u) ? 3500 : 0);
+scenarios.bd_arm_hang_bookmark = S => badgeThenMain(S, 'ARM hangs, Frieren bookmark', frierenWorld(Date.now()), { favorites: { book: [FRIEREN_BOOK] } },
+    (m, u) => /haglund/.test(u) ? 12000 : 0);
+
+// Досмотрели после полного пересчёта, а главная его копию подмешивает:
+// досмотренное не должно вернуться в «Новые серии»
+scenarios.bd_seen_after_full = async function (S) {
+    const now = Date.now();
+    const world = makeWorld(bdOngoing(now));
+    const e1 = createEnv({ route: world.route, storage: bdWarm(now) });
+    e1.load(FILE);
+    const badge = await bdBackground(e1);
+    const st = persisted(e1);
+    st.shikimori_seen = { s61001: { ep: 6, at: now } };
+    // Shikimori медленный — главная собирается без своих данных и берёт сохранённое
+    const e2 = createEnv({ route: bdRoute(world, (m, u) => /shikimori/.test(u) ? 12000 : 0), storage: st });
+    e2.load(FILE);
+    const m = await bdMain(e2);
+    // Контроль: без отметки тот же запуск показывает тайтл из сохранённого
+    const st0 = persisted(e1);
+    const e0 = createEnv({ route: bdRoute(world, (m, u) => /shikimori/.test(u) ? 12000 : 0), storage: st0 });
+    e0.load(FILE);
+    const m0 = await bdMain(e0);
+    check(S, 'control: not watched — shown from the saved full pass', m0.count == 1, m0.lines);
+    check(S, 'badge had it', badge == 1, badge);
+    check(S, 'full pass remembered its fresh titles', !!e2.Lampa.Storage.get('shikimori_fresh_items', null), m.lines);
+    check(S, 'watched after the full pass: not in «Новые серии»', m.count == 0, m.lines);
+};
 
 (async function () {
     const names = Object.keys(scenarios).filter(n => !ONLY || n.indexOf(ONLY) >= 0);
