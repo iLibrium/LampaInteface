@@ -2901,6 +2901,90 @@ scenarios.c7_popular_fallback_via_cub = async function (S) {
 };
 
 
+/* ------------------------------------------------------------------
+ * BD. Счётчик в меню против строки «Новые серии» при медленной сети.
+ * Жалоба: на счётчике три новых тайтла, а на главной ни «Новых серий»,
+ * ни «Я смотрю» — главная собиралась по MAIN_WAIT без личных данных
+ * (медленные Shikimori, ARM, лента Kodik), а фоновый пересчёт счётчика
+ * ждёт до 30 с. Всё, что на счётчике, должно быть и на главной
+ * ------------------------------------------------------------------ */
+function bdRoute(world, delay) {
+    const t0 = Date.now();
+    return (m, u, b) => {
+        const r = world.route(m, u, b);
+        const d = delay ? delay(m, u, Date.now() - t0) : 0;
+        if (d === 'hang') return Object.assign({}, r, { delay: 60000 });
+        if (d === 500) return { status: 500, body: { error: 'x' } };
+        return d ? Object.assign({}, r, { delay: d }) : r;
+    };
+}
+
+async function bdMain(env, wait) {
+    const comp = new env.components.shikimori_main({ component: 'shikimori_main', page: 1 });
+    comp.create();
+    const built = (await env.waitFor(() => comp.built, wait || 15000)) || [];
+    const fresh = lineOf(env, built, 'shikimori_title_fresh');
+    return { built, count: fresh ? fresh.results.length : 0, lines: built.map(l => (l.title || '-') + ':' + (l.results || []).length) };
+}
+
+async function bdBackground(env) {
+    env.store.set('shikimori_badge', JSON.stringify('wait'));
+    env.Lampa.Listener.send('app', { type: 'ready' });
+    await env.waitFor(() => typeof env.Lampa.Storage.get('shikimori_badge', 'wait') == 'number', 45000);
+    return env.Lampa.Storage.get('shikimori_badge', null);
+}
+
+// Сначала фоновый пересчёт на быстрой сети (так счётчик и получает число),
+// потом — запуск с тем же хранилищем и медленной сетью, и главная
+async function badgeThenMain(S, name, spec, envOpts, delay) {
+    const world = makeWorld(spec);
+    const e1 = createEnv(Object.assign({ route: world.route }, envOpts));
+    e1.load(FILE);
+    const badge = await bdBackground(e1);
+    const e2 = createEnv(Object.assign({}, envOpts, { route: bdRoute(world, delay), storage: persisted(e1) }));
+    e2.load(FILE);
+    const m = await bdMain(e2);
+    check(S, name + ': badge counts something', badge >= 1, badge);
+    check(S, name + ': main shows what the badge counts (' + m.count + ' >= ' + badge + ')', m.count >= badge, m.lines);
+    check(S, name + ': main does not lower the badge', e2.Lampa.Storage.get('shikimori_badge', 0) >= badge, e2.Lampa.Storage.get('shikimori_badge', 0));
+}
+
+const BD_VOICE = { id: 610, title: 'AniLibria.TV', type: 'voice' };
+function bdOngoing(now) {
+    const a = anime({ id: 61001, name: 'Adv Ongoing', russian: 'Онгоинг', kind: 'tv', status: 'ongoing', episodes: 12, episodesAired: 6 });
+    return {
+        animes: [a], user: { id: 42, nickname: 'me' },
+        rates: [{ id: 1, target_id: 61001, status: 'watching', episodes: 5 }],
+        kodikTokens: ['56a768d08f43091901c44b54fe970049'],
+        kodik: [{ shikimori_id: 61001, translation: BD_VOICE, last_episode: 6, updated_at: iso(now - 2 * HOUR), episodes_aired: 6 }]
+    };
+}
+// Kodik помнит 5 серий и проверял час назад — точечно не перепроверит
+function bdWarm(now) {
+    return { shikimori_user: 'me',
+        shikimori_kodik_eps: { s61001: { sid: 61001, ep: 5, base: 4, studio: 'AniLibria.TV', voice: true, at: now - 3 * DAY, aired: 5, checked: now - HOUR } } };
+}
+const bdList = u => /kodik[^/]*\/list/.test(u);
+
+// Лента 4 с — обычное дело на телевизоре. Первая версия правки ждала её
+// всего 2 с и теряла серию, которую до неё главная показывала
+scenarios.bd_feed_4s_warm = async function (S) {
+    const now = Date.now();
+    const world = makeWorld(bdOngoing(now));
+    const env = createEnv({ route: bdRoute(world, (m, u) => bdList(u) ? 4000 : 0), storage: bdWarm(now) });
+    env.load(FILE);
+    const m = await bdMain(env);
+    check(S, 'feed 4 s: main shows the new episode', m.count == 1, m.lines);
+};
+scenarios.bd_feed_12s = S => badgeThenMain(S, 'feed 12 s', bdOngoing(Date.now()), { storage: bdWarm(Date.now()) },
+    (m, u) => bdList(u) ? 12000 : 0);
+scenarios.bd_feed_hang = S => badgeThenMain(S, 'feed hangs', bdOngoing(Date.now()), { storage: bdWarm(Date.now()) },
+    (m, u) => bdList(u) ? 'hang' : 0);
+scenarios.bd_rates_slow = S => badgeThenMain(S, 'shikimori 3.5 s per request', bdOngoing(Date.now()), { storage: bdWarm(Date.now()) },
+    (m, u) => /shikimori/.test(u) ? 3500 : 0);
+scenarios.bd_arm_hang_bookmark = S => badgeThenMain(S, 'ARM hangs, Frieren bookmark', frierenWorld(Date.now()), { favorites: { book: [FRIEREN_BOOK] } },
+    (m, u) => /haglund/.test(u) ? 12000 : 0);
+
 (async function () {
     const names = Object.keys(scenarios).filter(n => !ONLY || n.indexOf(ONLY) >= 0);
     for (const name of names) {

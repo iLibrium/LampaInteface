@@ -62,6 +62,7 @@
     var REVERSE_MAX = 40;                     // обратных запросов TMDB->MAL за обновление
     var REVERSE_PARALLEL = 8;                 // и сколько из них одновременно
     var FAVORITES_WAIT = 2500;                // ждём синхронизацию закладок аккаунта, мс
+    var FEED_WAIT = 6000;                     // столько главная ждёт ленту Kodik с начала сборки
     var BADGE_DELAY = 6000;                   // пересчёт счётчика в меню — после загрузки приложения
     var SEQUELS_MAX = 40;                     // сколько досмотренных тайтлов проверяем на продолжения
     var FAV_TAGS = ['look', 'wath', 'book', 'viewed', 'thrown'];  // метки Lampa: Смотрю, Позже, Закладки, Просмотрено, Брошено
@@ -3657,6 +3658,10 @@
      * ============================================================ */
 
     var UserData = {
+        // Последний полный пересчёт (ничего не обрезано по времени) — по нему
+        // же стоит счётчик в меню
+        last_full: null,
+
         rates_cache: null,
         rates_time: 0,
 
@@ -3792,6 +3797,11 @@
             var feed_rows = null;
             var feed_wait = null;
             var feed_late = false;
+            var started = Date.now();
+            // Что-то не дождались и считали по накопленному. Такой результат
+            // не годится для счётчика в меню: он обнулял бы серии, которые
+            // полный пересчёт нашёл
+            var partial = false;
             if (Kodik.enabled()) {
                 Kodik.feed(net, gotFeed, function () { gotFeed([]); });
             }
@@ -3955,6 +3965,7 @@
                     var rev_list = null;
                     var list_timer = setTimeout(function () {
                         if (rev_list) return;
+                        partial = true;
                         rev_list = {};
                         for (var c = 0; c < vcards.length; c++) {
                             var cached = Match.reverseGet(vcards[c].id, 'tv');
@@ -4101,8 +4112,9 @@
                     if (!feed_wait) return;
                     feed_wait = null;
                     feed_late = true;
+                    partial = true;
                     go();
-                }, lookup_wait);
+                }, background ? BACKGROUND_WAIT : Math.max(lookup_wait, started + FEED_WAIT - Date.now()));
             }
 
             // Точечно спрашиваем Kodik об отслеживаемом: о неизвестном — всегда,
@@ -4175,10 +4187,11 @@
                 var timer = setTimeout(function () {
                     if (settled) return;
                     settled = true;
-                    var partial = {};
-                    for (var p in fresh) partial[p] = fresh[p];
-                    for (var q in progress.result) partial[q] = progress.result[q];
-                    Kodik.remember(partial, progress.checked.slice(0));
+                    partial = true;
+                    var got = {};
+                    for (var p in fresh) got[p] = fresh[p];
+                    for (var q in progress.result) got[q] = progress.result[q];
+                    Kodik.remember(got, progress.checked.slice(0));
                     finish();
                 }, lookup_wait);
 
@@ -4401,6 +4414,7 @@
                     if (!pending_go) return;
                     var go = pending_go;
                     pending_go = null;
+                    partial = true;
                     go();
                 }, seasons_wait);
             }
@@ -4581,6 +4595,8 @@
                     });
                 }
 
+                items.partial = partial;
+                if (!partial) UserData.last_full = items;
                 ok(items);
             }
         },
@@ -5179,6 +5195,8 @@
             function track(rates) {
                 UserData.tracked(net, rates, function (items) {
                     lines.tracked = items;
+                    // Экран собрался без них, но пересчёт полный — счётчику он годится
+                    if (built && !items.partial) updateMenuBadge(items);
                     join();
 
 
@@ -5272,18 +5290,37 @@
                 cardClass: function (elem) { return new ActionCard(elem); }
             });
 
-            var tracked = lines.tracked || [];
+            // Экран не дождался своих данных (медленные Shikimori, ARM, лента
+            // Kodik) — берём последний полный пересчёт, тот же, что стоит на
+            // счётчике в меню. Раньше строки «Новые серии» и «Я смотрю» тогда
+            // пропадали, а счётчик показывал три новых тайтла
+            var full = UserData.last_full;
+            var tracked = lines.tracked || full || [];
+            // Первый показ после запуска: полного пересчёта в памяти ещё нет —
+            // берём то, что запомнил последний (счётчик показывает его же)
+            if (!full && (!lines.tracked || lines.tracked.partial)) full = storGet('shikimori_fresh_items', null);
+            if (!(full instanceof Array)) full = null;
             var i;
 
-            // Экран открыт — данные свежие, счётчик в меню обновляем заодно.
-            // Только если они пришли: экран мог собраться по таймеру без них,
-            // и тогда пустой список обнулил бы счётчик до следующего пересчёта
-            if (lines.tracked) updateMenuBadge(tracked);
+            // Счётчик обновляем только полными данными: обрезанные по времени
+            // обнулили бы серии, которые нашёл полный пересчёт
+            if (lines.tracked && !lines.tracked.partial) updateMenuBadge(tracked);
 
-            // Новые серии — доступны с озвучкой, не просмотрены и появились недавно
+            // Новые серии — доступны с озвучкой, не просмотрены и появились недавно.
+            // Данные экрана неполные — добавляем то, что нашёл полный пересчёт:
+            // всё, что на счётчике, должно быть и здесь
             var fresh = [];
+            var fresh_keys = {};
             for (i = 0; i < tracked.length; i++) {
-                if (isFresh(tracked[i])) fresh.push(tracked[i]);
+                if (isFresh(tracked[i])) {
+                    fresh.push(tracked[i]);
+                    fresh_keys[itemKey(tracked[i])] = true;
+                }
+            }
+            if (full && full !== tracked && (tracked.partial || !lines.tracked)) {
+                for (i = 0; i < full.length; i++) {
+                    if (isFresh(full[i]) && !fresh_keys[itemKey(full[i])]) fresh.push(full[i]);
+                }
             }
             fresh.sort(function (a, b) { return b.at - a.at; });
 
@@ -7362,6 +7399,14 @@
     function updateMenuBadge(items) {
         var count = countFresh(items);
         storSet('shikimori_badge', count);
+        // Вместе с числом — сами тайтлы: главная, не дождавшись своих данных,
+        // покажет их, и счётчик не разойдётся со строкой «Новые серии».
+        // Пишется только при полном пересчёте, не чаще пересчёта счётчика
+        var keep = [];
+        for (var i = 0; i < items.length && keep.length < 30; i++) {
+            if (isFresh(items[i])) keep.push(items[i]);
+        }
+        storSet('shikimori_fresh_items', keep);
         paintMenuBadge(count);
     }
 
