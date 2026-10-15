@@ -242,6 +242,39 @@ scenarios.t7_recheck_known = async function (S) {
 };
 
 /* ------------------------------------------------------------------
+ * T7b. Лента Kodik медленная: главная не ждёт её дольше MAIN_WAIT, и раньше
+ * «Новые серии» и «Я смотрю» пропадали целиком, а счётчик в меню (фоновый
+ * пересчёт ждёт до 30 с) показывал новые серии, которых на экране нет
+ * ------------------------------------------------------------------ */
+scenarios.t7b_slow_feed = async function (S) {
+    const now = Date.now();
+    const a = anime({ id: 60004, name: 'Slow Feed', russian: 'Медленная лента', kind: 'tv', status: 'ongoing',
+        episodes: 12, episodesAired: 6 });
+    const spec = {
+        animes: [a],
+        user: { id: 42, nickname: 'me' },
+        rates: [{ id: 1, target_id: 60004, status: 'watching', episodes: 5 }],
+        kodikTokens: ['56a768d08f43091901c44b54fe970049'],
+        kodik: [{ shikimori_id: 60004, translation: { id: 610, title: 'AniLibria.TV', type: 'voice' }, last_episode: 6,
+            updated_at: iso(now - 2 * HOUR), episodes_aired: 6 }]
+    };
+    const world = makeWorld(spec);
+    const route = (m, u, b) => /kodik[^/]*\/list/.test(u) ? Object.assign({ delay: 12000 }, world.route(m, u, b)) : world.route(m, u, b);
+    const env = createEnv({ route, storage: {
+        shikimori_user: 'me',
+        shikimori_kodik_eps: { s60004: { sid: 60004, ep: 6, base: 5, studio: 'AniLibria.TV', voice: true, at: now - 2 * HOUR, aired: 6, checked: now } }
+    } });
+    env.load(FILE);
+    const comp = new env.components.shikimori_main({ component: 'shikimori_main', page: 1 });
+    comp.create();
+    const built = (await env.waitFor(() => comp.built, 15000)) || [];
+    const fresh = lineOf(env, built, 'shikimori_title_fresh');
+    const hit = fresh && fresh.results.find(c => String(c.id) == '60004');
+    check(S, 'fresh row is built while the Kodik feed is still loading', !!hit,
+        { lines: built.map(l => l.title + ':' + (l.results || []).length) });
+};
+
+/* ------------------------------------------------------------------
  * T8. Счётчик эфира у Kodik отстал на серию
  * ------------------------------------------------------------------ */
 scenarios.t8_aired_lag = async function (S) {

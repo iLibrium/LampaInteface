@@ -13,7 +13,7 @@
      * ============================================================ */
 
     var PLUGIN = 'shikimori';
-    var VERSION = '3.7.3';
+    var VERSION = '3.7.4';
 
     var SHIKI_BASE = 'https://shikimori.io';
     var ARM_BASE = 'https://arm.haglund.dev';
@@ -4080,10 +4080,23 @@
                 if (!Kodik.enabled()) return finish();
 
                 function go() {
-                    lookup(Kodik.mergeRows(feed_rows));
+                    clearTimeout(feed_timer);
+                    lookup(Kodik.mergeRows(feed_rows || []));
                 }
-                if (feed_rows) go();
-                else feed_wait = go;
+                // Лента дочитывается страницами (до KODIK_SYNC_PAGES подряд) и на
+                // телевизоре идёт дольше MAIN_WAIT. Главная собиралась без личных
+                // строк: «Новые серии» и «Я смотрю» пропадали, а счётчик в меню
+                // (фоновый пересчёт ждёт дольше) показывал серии, которых на
+                // экране нет. Не дождались — считаем по накопленному, лента
+                // догрузится в фоне и войдёт в следующий показ
+                var feed_timer = null;
+                if (feed_rows) return go();
+                feed_wait = go;
+                feed_timer = setTimeout(function () {
+                    if (!feed_wait) return;
+                    feed_wait = null;
+                    go();
+                }, lookup_wait);
             }
 
             // Точечно спрашиваем Kodik об отслеживаемом: о неизвестном — всегда,
