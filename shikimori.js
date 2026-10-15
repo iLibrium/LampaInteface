@@ -3791,6 +3791,7 @@
             // с сопоставлением. Раньше она ждала, пока сопоставятся все закладки
             var feed_rows = null;
             var feed_wait = null;
+            var feed_late = false;
             if (Kodik.enabled()) {
                 Kodik.feed(net, gotFeed, function () { gotFeed([]); });
             }
@@ -3881,6 +3882,10 @@
                     feed_wait = null;
                     go();
                 }
+                // Главная ленту не дождалась, а точка сверки уже сдвинута —
+                // не запомнить строки сейчас значит потерять их: следующая
+                // лента начнётся после них
+                else if (feed_late) Kodik.remember(Kodik.mergeRows(feed_rows), []);
             }
 
             // Тайтлы из списка Shikimori с уже известной карточкой TMDB: семью
@@ -4095,6 +4100,7 @@
                 feed_timer = setTimeout(function () {
                     if (!feed_wait) return;
                     feed_wait = null;
+                    feed_late = true;
                     go();
                 }, lookup_wait);
             }

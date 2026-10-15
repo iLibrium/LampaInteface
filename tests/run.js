@@ -256,7 +256,9 @@ scenarios.t7b_slow_feed = async function (S) {
         rates: [{ id: 1, target_id: 60004, status: 'watching', episodes: 5 }],
         kodikTokens: ['56a768d08f43091901c44b54fe970049'],
         kodik: [{ shikimori_id: 60004, translation: { id: 610, title: 'AniLibria.TV', type: 'voice' }, last_episode: 6,
-            updated_at: iso(now - 2 * HOUR), episodes_aired: 6 }]
+            updated_at: iso(now - 2 * HOUR), episodes_aired: 6 },
+            { shikimori_id: 60005, translation: { id: 610, title: 'AniLibria.TV', type: 'voice' }, last_episode: 3,
+            updated_at: iso(now - HOUR), episodes_aired: 3 }]
     };
     const world = makeWorld(spec);
     const route = (m, u, b) => /kodik[^/]*\/list/.test(u) ? Object.assign({ delay: 12000 }, world.route(m, u, b)) : world.route(m, u, b);
@@ -272,6 +274,11 @@ scenarios.t7b_slow_feed = async function (S) {
     const hit = fresh && fresh.results.find(c => String(c.id) == '60004');
     check(S, 'fresh row is built while the Kodik feed is still loading', !!hit,
         { lines: built.map(l => l.title + ':' + (l.results || []).length) });
+    // Опоздавшая лента всё равно запоминается: точка сверки уже сдвинута,
+    // и в следующую ленту эти строки не попадут
+    await env.waitFor(() => { const st = env.Lampa.Storage.get('shikimori_kodik_eps', {}); return st.s60005; }, 15000);
+    const st = env.Lampa.Storage.get('shikimori_kodik_eps', {});
+    check(S, 'late feed rows are remembered', !!st.s60005, Object.keys(st));
 };
 
 /* ------------------------------------------------------------------
